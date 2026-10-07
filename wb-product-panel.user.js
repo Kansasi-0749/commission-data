@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         WB 商品数据窗口
 // @namespace    http://tampermonkey.net/
-// @version      13.13
+// @version      13.14
 // @updateURL    https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/wb-product-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/wb-product-panel.user.js
 // @description  拦截 Wildberries 商品接口，显示商品数据；一键跳转预算计算器并自动填充重量/尺寸/售价/类目
 // @match        https://www.wildberries.ru/*
 // @match        https://yadmin.sanlindou.com/goods-shop/budget-calculator*
+// @match        https://yadmin.sanlindou.com/site/login*
 // @run-at       document-start
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -104,7 +105,10 @@
     }
 
     if (location.hostname === 'www.wildberries.ru') initWildberries();
-    else if (location.hostname === 'yadmin.sanlindou.com') initBudgetCalculator();
+    else if (location.hostname === 'yadmin.sanlindou.com') {
+        if (/^\/site\/login(?:\/|$)/i.test(location.pathname)) initBudgetLoginKeyboard();
+        else if (/^\/goods-shop\/budget-calculator(?:\/|$)/i.test(location.pathname)) initBudgetCalculator();
+    }
 
     // ============================================================
     // WB 端
@@ -1397,6 +1401,47 @@
     }
 
     // ============================================================
+    // 预算站登录页：让 Enter 明确触发登录按钮，避免触发验证码刷新按钮。
+    function initBudgetLoginKeyboard() {
+        const loginLabel = /登录|登入|login|sign\s*in|войти|вход/i;
+        const passwordSelector = 'input[type="password"], input[autocomplete="current-password"]';
+
+        function buttonLabel(button) {
+            return [button.innerText, button.textContent, button.value,
+                button.getAttribute('aria-label'), button.title]
+                .filter(Boolean)
+                .join(' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+        }
+
+        function findLoginButton(root) {
+            return Array.from(root.querySelectorAll(
+                'button, input[type="submit"], input[type="button"], [role="button"]'
+            )).find(button => !button.disabled && loginLabel.test(buttonLabel(button)));
+        }
+
+        document.addEventListener('keydown', event => {
+            if (event.key !== 'Enter' || event.repeat || event.isComposing || event.keyCode === 229) return;
+            const input = event.target;
+            if (!(input instanceof HTMLInputElement)) return;
+            if (!['text', 'email', 'password', 'tel'].includes((input.type || 'text').toLowerCase())) return;
+
+            const form = input.form || input.closest('form');
+            const loginForm = form && form.querySelector(passwordSelector);
+            const loginPageHasPassword = document.querySelector(passwordSelector);
+            if (!loginForm && !loginPageHasPassword) return;
+
+            const button = findLoginButton(form || document) || findLoginButton(document);
+            if (!button) return;
+
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation();
+            button.click();
+        }, true);
+    }
+
     // 预算计算器端
     // ============================================================
     function initBudgetCalculator() {
