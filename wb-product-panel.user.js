@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WB 商品数据窗口
 // @namespace    http://tampermonkey.net/
-// @version      13.11
+// @version      13.12
 // @updateURL    https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/wb-product-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/wb-product-panel.user.js
 // @description  拦截 Wildberries 商品接口，显示商品数据；一键跳转预算计算器并自动填充重量/尺寸/售价/类目
@@ -903,6 +903,7 @@
                     flex:1; padding:6px 8px; font-size:12px; font-weight:600;
                     background:#cb11ab; color:#fff; border:none; border-radius:5px; cursor:pointer;
                 `;
+                let budgetBtnFeedbackTimer = null;
                 budgetBtn.onclick = (e) => {
                     e.stopPropagation();
                     const weightRaw    = getByPath(product, 'weight');
@@ -928,7 +929,26 @@
                                 ' price:', price,
                                 ' root:', subjRootName, ' subj:', subjName,
                                 ' URL:', url.toString());
-                    window.open(url.toString(), '_blank');
+                    const popupFeatures = 'popup=yes,width=1180,height=850,resizable=yes,scrollbars=yes';
+                    const calculatorWindow = window.open(
+                        url.toString(),
+                        'wb-budget-calculator',
+                        popupFeatures,
+                    );
+                    if (calculatorWindow) {
+                        calculatorWindow.focus();
+                        return;
+                    }
+
+                    console.warn('[WB预算] 浏览器拦截了计算器弹窗');
+                    budgetBtn.textContent = '请允许弹窗';
+                    budgetBtn.title = '请允许 Wildberries 页面弹出窗口，然后重试';
+                    clearTimeout(budgetBtnFeedbackTimer);
+                    budgetBtnFeedbackTimer = setTimeout(() => {
+                        if (!budgetBtn.isConnected) return;
+                        budgetBtn.textContent = '预算计算器';
+                        budgetBtn.title = '';
+                    }, 2500);
                 };
                 actionRow.appendChild(budgetBtn);
 
