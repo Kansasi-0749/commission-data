@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         WB 商品数据窗口
 // @namespace    http://tampermonkey.net/
-// @version      13.14
+// @version      13.15
 // @updateURL    https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/wb-product-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/wb-product-panel.user.js
-// @description  拦截 Wildberries 商品接口，显示商品数据；一键跳转预算计算器并自动填充重量/尺寸/售价/类目
+// @description  拦截 Wildberries 商品接口，显示商品数据；在页面浮窗中调用预算接口并展示计算结果
 // @match        https://www.wildberries.ru/*
 // @match        https://yadmin.sanlindou.com/goods-shop/budget-calculator*
+// @match        https://yadmin.sanlindou.com/goods-shop/budget-calc*
 // @match        https://yadmin.sanlindou.com/site/login*
 // @run-at       document-start
 // @grant        GM_getValue
@@ -15,12 +16,14 @@
 // @grant        unsafeWindow
 // @connect      api.github.com
 // @connect      raw.githubusercontent.com
+// @connect      yadmin.sanlindou.com
 // ==/UserScript==
 
 (function () {
     'use strict';
 
-    const BUDGET_URL = 'https://yadmin.sanlindou.com/goods-shop/budget-calculator';
+    const BUDGET_CALC_URL = 'https://yadmin.sanlindou.com/goods-shop/budget-calc';
+    const BUDGET_CATEGORY_TREE_KEY = 'wb_budget_category_tree_v1';
     const DEFAULT_DISCOUNT_PERCENT = 35;
     const LS_DISCOUNT_PERCENT = 'wb_budget_discount_percent';
 
@@ -35,6 +38,79 @@
             if (acc == null) return undefined;
             return acc[key];
         }, obj);
+    }
+
+    function normalizeCategoryLabel(value) {
+        return String(value || '')
+            .replace(/[（(].*?[)）]/g, '')
+            .replace(/\s+/g, '')
+            .toLowerCase();
+    }
+
+    function flattenWbCategoryTree(tree) {
+        const entries = [];
+        const getLabel = node => String(node?.label ?? node?.name ?? node?.title ?? node?.text ?? '').trim();
+        const getId = node => node?.value ?? node?.id ?? node?.category_id ?? node?.categoryId
+            ?? node?.subject_id ?? node?.subjectId ?? node?.subj_id ?? node?.key ?? node?.code ?? '';
+        const getChildren = node => node?.children ?? node?.child ?? node?.nodes ?? node?.list ?? [];
+
+        function visit(nodes, rootName) {
+            if (!Array.isArray(nodes)) return;
+            for (const node of nodes) {
+                const label = getLabel(node);
+                const children = getChildren(node);
+                const root = rootName || label;
+                if (Array.isArray(children) && children.length) {
+                    visit(children, root);
+                } else if (rootName && label) {
+                    const id = getId(node);
+                    if (id !== '' && id != null) entries.push({ root, subject: label, id: String(id) });
+                }
+            }
+        }
+
+        visit(tree, '');
+        return entries;
+    }
+
+    function cacheWbCategoryTree(tree) {
+        if (typeof GM_setValue !== 'function' || !Array.isArray(tree)) return;
+        const entries = flattenWbCategoryTree(tree);
+        if (!entries.length) return;
+        try { GM_setValue(BUDGET_CATEGORY_TREE_KEY, entries); }
+        catch (error) { console.warn('[WB预算] 类目树缓存失败', error); }
+    }
+
+    function findWbCategoryId(product) {
+        const root = getByPath(product, '__card__.subj_root_name');
+        const subject = getByPath(product, '__card__.subj_name');
+        if (root && subject && typeof GM_getValue === 'function') {
+            try {
+                const entries = GM_getValue(BUDGET_CATEGORY_TREE_KEY, []);
+                if (Array.isArray(entries)) {
+                    const rootKey = normalizeCategoryLabel(root);
+                    const subjectKey = normalizeCategoryLabel(subject);
+                    const matches = entries.filter(entry =>
+                        normalizeCategoryLabel(entry.root) === rootKey
+                        && normalizeCategoryLabel(entry.subject) === subjectKey
+                    );
+                    const ids = Array.from(new Set(matches.map(entry => String(entry.id))));
+                    if (ids.length === 1) return ids[0];
+                }
+            } catch (error) {
+                console.warn('[WB预算] 读取类目树缓存失败', error);
+            }
+        }
+
+        const candidates = [
+            'subjectId', 'subjectID', 'subject_id', 'subjId', 'subj_id',
+            '__card__.subject_id', '__card__.subj_id', '__card__.wb_category_id',
+        ];
+        for (const path of candidates) {
+            const value = getByPath(product, path);
+            if (value !== '' && value != null) return String(value);
+        }
+        return '';
     }
 
     function pickProductPrice(product) {
@@ -107,7 +183,7 @@
     if (location.hostname === 'www.wildberries.ru') initWildberries();
     else if (location.hostname === 'yadmin.sanlindou.com') {
         if (/^\/site\/login(?:\/|$)/i.test(location.pathname)) initBudgetLoginKeyboard();
-        else if (/^\/goods-shop\/budget-calculator(?:\/|$)/i.test(location.pathname)) initBudgetCalculator();
+        else if (/^\/goods-shop\/budget-(?:calc|calculator)(?:\/|$)/i.test(location.pathname)) initBudgetCalculator();
     }
 
     // ============================================================
@@ -510,6 +586,8 @@
             return { ...product, __card__: {
                 subj_root_name: getCardField(card, ['subj_root_name', 'subjRootName', 'subject_root_name', 'subjectRootName']),
                 subj_name: getCardField(card, ['subj_name', 'subjName', 'subject_name', 'subjectName']),
+                subject_id: getCardField(card, ['subjectId', 'subject_id', 'subjId', 'subj_id', 'subjectID']),
+                wb_category_id: getCardField(card, ['wb_category_id', 'wbCategoryId']),
                 create_date: getCardField(card, ['create_date', 'createDate', 'created_at', 'createdAt']),
                 package_volume: getPackageVolume(card),
             }};
@@ -542,9 +620,12 @@
         let insertQueued = false;
         let panelClosed = false;
         let budgetModalEl = null;
-        let budgetFrameEl = null;
         let budgetModalReturnFocus = null;
-        let budgetModalPreviousOverflow = '';
+        let budgetFormEl = null;
+        let budgetTitleEl = null;
+        let budgetStatusEl = null;
+        let budgetResultEl = null;
+        let budgetSubmitEl = null;
         let lastRouteHref = location.href;
         let routeHooksInstalled = false;
 
@@ -560,88 +641,405 @@
         function closeBudgetModal() {
             if (!budgetModalEl || budgetModalEl.style.display === 'none') return;
             budgetModalEl.style.display = 'none';
-            if (budgetFrameEl) budgetFrameEl.src = 'about:blank';
-            if (document.documentElement) document.documentElement.style.overflow = budgetModalPreviousOverflow;
             if (budgetModalReturnFocus?.isConnected) budgetModalReturnFocus.focus({ preventScroll: true });
             budgetModalReturnFocus = null;
+        }
+
+        function setBudgetStatus(message, kind) {
+            if (!budgetStatusEl) return;
+            budgetStatusEl.textContent = message || '';
+            budgetStatusEl.style.color = kind === 'error' ? '#b42318'
+                : kind === 'success' ? '#16803c' : '#666';
+        }
+
+        function formatCalculationValue(value, unit) {
+            if (value === null || value === undefined || value === '') return '—';
+            const number = Number(value);
+            const text = Number.isFinite(number)
+                ? number.toLocaleString('zh-CN', { maximumFractionDigits: 2 })
+                : String(value);
+            return unit ? text + ' ' + unit : text;
+        }
+
+        function renderCalculationResults(responseData) {
+            budgetResultEl.replaceChildren();
+            const fieldRows = [
+                ['category_commission_point', '类目佣金', '%'],
+                ['start_logistics_cost', '首段物流', '₽'],
+                ['end_logistics_cost', '末段物流', '₽'],
+                ['warehousing_fee', '仓储费', '₽'],
+                ['cost_price', '成本价', '₽'],
+                ['handling_fee', '手续费', '₽'],
+                ['tax', '税费', '₽'],
+                ['profit', '利润', '₽'],
+                ['rate', '收益率', ''],
+                ['recommend_price', '建议售价', '₽'],
+            ];
+
+            function appendMarket(title, rows) {
+                if (!Array.isArray(rows) || !rows.length) return;
+                const section = document.createElement('section');
+                section.style.cssText = 'margin-top:12px;';
+                const heading = document.createElement('h3');
+                heading.textContent = title;
+                heading.style.cssText = 'margin:0 0 6px;font-size:13px;color:#333;';
+                section.appendChild(heading);
+
+                const scroller = document.createElement('div');
+                scroller.style.cssText = 'overflow:auto;border:1px solid #e5e5e5;border-radius:4px;';
+                const table = document.createElement('table');
+                table.style.cssText = 'width:100%;min-width:560px;border-collapse:collapse;font-size:12px;';
+                const thead = document.createElement('thead');
+                const headRow = document.createElement('tr');
+                const headings = ['指标', ...rows.map(item => item.fulfillment || '结果')];
+                for (const label of headings) {
+                    const th = document.createElement('th');
+                    th.textContent = label;
+                    th.style.cssText = 'padding:6px 8px;text-align:right;background:#f6f6f6;border-bottom:1px solid #e5e5e5;white-space:nowrap;';
+                    if (label === '指标') th.style.textAlign = 'left';
+                    headRow.appendChild(th);
+                }
+                thead.appendChild(headRow);
+                table.appendChild(thead);
+
+                const tbody = document.createElement('tbody');
+                for (const [key, label, unit] of fieldRows) {
+                    if (!rows.some(item => Object.prototype.hasOwnProperty.call(item, key))) continue;
+                    const tr = document.createElement('tr');
+                    const nameCell = document.createElement('th');
+                    nameCell.textContent = label;
+                    nameCell.style.cssText = 'padding:5px 8px;text-align:left;font-weight:500;color:#555;border-bottom:1px solid #eee;white-space:nowrap;';
+                    tr.appendChild(nameCell);
+                    for (const item of rows) {
+                        const td = document.createElement('td');
+                        td.textContent = formatCalculationValue(item[key], unit);
+                        td.style.cssText = 'padding:5px 8px;text-align:right;border-bottom:1px solid #eee;white-space:nowrap;';
+                        if (key === 'profit') td.style.color = Number(item[key]) < 0 ? '#b42318' : '#16803c';
+                        if (key === 'recommend_price') td.style.fontWeight = '700';
+                        tr.appendChild(td);
+                    }
+                    tbody.appendChild(tr);
+                }
+                table.appendChild(tbody);
+                scroller.appendChild(table);
+                section.appendChild(scroller);
+                budgetResultEl.appendChild(section);
+            }
+
+            appendMarket('WB 计算结果', responseData?.wb);
+            appendMarket('OZON 计算结果', responseData?.ozon);
+            if (!budgetResultEl.childElementCount) {
+                const empty = document.createElement('div');
+                empty.textContent = '服务器未返回可展示的计算结果。';
+                empty.style.cssText = 'padding:10px 0;color:#888;font-size:12px;';
+                budgetResultEl.appendChild(empty);
+            }
+        }
+
+        function gmRequest(options) {
+            return new Promise((resolve, reject) => {
+                if (typeof GM_xmlhttpRequest !== 'function') {
+                    reject(new Error('油猴跨域请求接口不可用'));
+                    return;
+                }
+                GM_xmlhttpRequest({
+                    ...options,
+                    anonymous: false,
+                    onload: resolve,
+                    onerror: () => reject(new Error('预算站网络请求失败')),
+                    ontimeout: () => reject(new Error('预算站请求超时')),
+                });
+            });
+        }
+
+        async function getBudgetCsrfToken() {
+            const response = await gmRequest({
+                method: 'GET',
+                url: BUDGET_CALC_URL,
+                timeout: 20000,
+                headers: { Accept: 'text/html,application/xhtml+xml' },
+            });
+            const finalUrl = String(response.finalUrl || '');
+            const html = String(response.responseText || '');
+            if (/\/site\/login(?:[/?#]|$)/i.test(finalUrl)) {
+                throw new Error('预算站登录状态无效，请先在同一浏览器中登录预算站。');
+            }
+            if (response.status >= 400) {
+                throw new Error('读取预算页失败，HTTP ' + response.status);
+            }
+            const page = new DOMParser().parseFromString(html, 'text/html');
+            if (page.querySelector('input[type="password"]')) {
+                throw new Error('预算站要求登录。请先在同一浏览器中登录预算站。');
+            }
+            return page.querySelector('meta[name="csrf-token"]')?.content
+                || page.querySelector('input[name="_token"]')?.value
+                || '';
+        }
+
+        async function postBudgetCalculation(payload) {
+            const csrfToken = await getBudgetCsrfToken();
+            const headers = {
+                Accept: 'application/json, text/javascript, */*; q=0.01',
+                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                'X-Requested-With': 'XMLHttpRequest',
+            };
+            if (csrfToken) headers['X-CSRF-TOKEN'] = csrfToken;
+
+            const response = await gmRequest({
+                method: 'POST',
+                url: BUDGET_CALC_URL,
+                timeout: 30000,
+                headers,
+                data: new URLSearchParams(payload).toString(),
+            });
+            const finalUrl = String(response.finalUrl || '');
+            if (/\/site\/login(?:[/?#]|$)/i.test(finalUrl) || response.status === 401 || response.status === 403) {
+                throw new Error('预算站登录状态失效，请先登录后重试。');
+            }
+            if (response.status === 419) {
+                throw new Error('预算站安全令牌已过期，请刷新登录状态后重试。');
+            }
+            if (response.status < 200 || response.status >= 300) {
+                throw new Error('计算请求失败，HTTP ' + response.status);
+            }
+            let result;
+            try { result = JSON.parse(response.responseText || ''); }
+            catch (error) { throw new Error('服务器返回的内容不是 JSON，无法解析计算结果。'); }
+            if (Number(result?.status) !== 1) {
+                throw new Error(result?.msg || '预算服务器计算失败。');
+            }
+            return result;
+        }
+
+        function defaultPackageDimensions(product) {
+            const text = String(getByPath(product, '__card__.package_volume') || '');
+            const match = text.match(/^\s*([\d.,]+)\s*[x×]\s*([\d.,]+)\s*[x×]\s*([\d.,]+)/i);
+            if (match) {
+                return {
+                    length: match[1].replace(',', '.'),
+                    width: match[2].replace(',', '.'),
+                    height: match[3].replace(',', '.'),
+                };
+            }
+            const volumeRaw = Number(getByPath(product, 'volume'));
+            const fallback = Number.isFinite(volumeRaw) ? LWH_RULE(volumeRaw / 10) : null;
+            return fallback || { length: '', width: '', height: '' };
+        }
+
+        function submitBudgetCalculation() {
+            if (!budgetFormEl || !budgetSubmitEl) return;
+            const payload = {};
+            for (const name of [
+                'cgoods_no', 'weight', 'purchase_price', 'length', 'width', 'height',
+                'price', 'exchange_rate', 'is_lighting', 'ozon_category_name', 'wb_category_name',
+            ]) {
+                payload[name] = String(budgetFormEl.elements[name]?.value || '').trim();
+            }
+            const required = ['weight', 'purchase_price', 'length', 'width', 'height', 'price', 'exchange_rate', 'wb_category_name'];
+            const missing = required.find(name => payload[name] === '');
+            if (missing) {
+                setBudgetStatus('请填写必需数据后再计算。', 'error');
+                budgetFormEl.elements[missing]?.focus();
+                return;
+            }
+            const numeric = ['weight', 'purchase_price', 'length', 'width', 'height', 'price', 'exchange_rate'];
+            const invalid = numeric.find(name => !Number.isFinite(Number(payload[name])));
+            if (invalid) {
+                setBudgetStatus('重量、采购价、尺寸、售价和汇率必须是有效数字。', 'error');
+                budgetFormEl.elements[invalid]?.focus();
+                return;
+            }
+
+            budgetSubmitEl.disabled = true;
+            budgetSubmitEl.textContent = '计算中…';
+            budgetResultEl.replaceChildren();
+            setBudgetStatus('正在提交到预算服务器…', 'loading');
+            postBudgetCalculation(payload).then(result => {
+                renderCalculationResults(result.data);
+                setBudgetStatus(result.msg || '计算成功', 'success');
+                try { GM_setValue('wb_budget_exchange_rate', payload.exchange_rate); } catch (error) {}
+            }).catch(error => {
+                setBudgetStatus(error.message || '计算失败', 'error');
+            }).finally(() => {
+                budgetSubmitEl.disabled = false;
+                budgetSubmitEl.textContent = '开始计算';
+            });
         }
 
         function ensureBudgetModal() {
             if (budgetModalEl) return;
 
-            const overlay = document.createElement('div');
-            overlay.id = 'wb-budget-modal-overlay';
-            overlay.setAttribute('role', 'presentation');
-            overlay.style.cssText = `
-                position:fixed; inset:0; z-index:2147483647;
-                display:none; align-items:center; justify-content:center;
-                padding:12px; box-sizing:border-box;
-                background:rgba(18,18,18,.48);
-            `;
-
             const dialog = document.createElement('section');
+            dialog.id = 'wb-budget-calculator-float';
             dialog.setAttribute('role', 'dialog');
-            dialog.setAttribute('aria-modal', 'true');
             dialog.setAttribute('aria-label', '预算计算器');
-            dialog.style.cssText = `
-                display:flex; flex-direction:column; overflow:hidden;
-                width:min(1180px, calc(100vw - 24px));
-                height:min(850px, calc(100vh - 24px));
-                min-height:240px; box-sizing:border-box;
-                background:#fff; border-radius:8px;
-                box-shadow:0 12px 48px rgba(0,0,0,.24);
-            `;
+            dialog.style.cssText = 'position:fixed;top:84px;right:18px;z-index:2147483647;display:none;flex-direction:column;overflow:hidden;width:min(720px,calc(100vw - 24px));max-height:calc(100vh - 100px);box-sizing:border-box;background:#fff;border:1px solid #d7d7d7;border-radius:6px;box-shadow:0 12px 40px rgba(0,0,0,.22);font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;color:#222;';
 
             const header = document.createElement('header');
-            header.style.cssText = `
-                display:flex; align-items:center; justify-content:space-between;
-                flex:0 0 42px; padding:0 14px; box-sizing:border-box;
-                color:#fff; background:#cb11ab; font:600 14px/1.2 -apple-system,"Segoe UI",Arial,sans-serif;
-            `;
+            header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:10px;flex:0 0 42px;padding:0 12px;box-sizing:border-box;color:#fff;background:#cb11ab;cursor:move;touch-action:none;user-select:none;';
             const title = document.createElement('span');
             title.textContent = '预算计算器';
+            title.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;';
 
             const closeButton = document.createElement('button');
             closeButton.type = 'button';
             closeButton.setAttribute('aria-label', '关闭预算计算器');
             closeButton.title = '关闭';
             closeButton.textContent = '✕';
-            closeButton.style.cssText = `
-                display:grid; place-items:center; width:30px; height:30px;
-                padding:0; border:0; color:inherit; background:transparent;
-                font:400 18px/1 Arial,sans-serif; cursor:pointer;
-            `;
+            closeButton.style.cssText = 'display:grid;place-items:center;flex:0 0 30px;width:30px;height:30px;padding:0;border:0;color:inherit;background:transparent;font:400 18px/1 Arial,sans-serif;cursor:pointer;';
             closeButton.addEventListener('click', closeBudgetModal);
             header.append(title, closeButton);
 
-            const frame = document.createElement('iframe');
-            frame.title = '预算计算器';
-            frame.style.cssText = 'display:block; flex:1 1 auto; min-height:0; width:100%; border:0; background:#fff;';
+            const body = document.createElement('div');
+            body.style.cssText = 'overflow:auto;padding:12px;min-height:0;';
+            const productTitle = document.createElement('div');
+            productTitle.style.cssText = 'margin:0 0 10px;color:#555;font-size:12px;line-height:1.4;word-break:break-word;';
+            body.appendChild(productTitle);
 
-            dialog.append(header, frame);
-            overlay.appendChild(dialog);
-            overlay.addEventListener('mousedown', event => {
-                if (event.target === overlay) closeBudgetModal();
+            const form = document.createElement('form');
+            form.noValidate = true;
+            const grid = document.createElement('div');
+            grid.id = 'wb-budget-fields';
+            grid.style.cssText = 'display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 12px;';
+
+            function addField(name, labelText, value, type, options) {
+                const wrapper = document.createElement('label');
+                wrapper.style.cssText = 'display:flex;flex-direction:column;gap:3px;min-width:0;color:#555;font-size:11px;';
+                const caption = document.createElement('span');
+                caption.textContent = labelText;
+                const input = options ? document.createElement('select') : document.createElement('input');
+                input.name = name;
+                if (options) {
+                    for (const [optionValue, optionText] of options) {
+                        const option = document.createElement('option');
+                        option.value = optionValue;
+                        option.textContent = optionText;
+                        input.appendChild(option);
+                    }
+                } else {
+                    input.type = type || 'text';
+                    if (input.type === 'number') input.step = 'any';
+                    input.autocomplete = 'off';
+                }
+                input.value = value == null ? '' : String(value);
+                input.style.cssText = 'width:100%;height:32px;box-sizing:border-box;padding:5px 7px;border:1px solid #cfcfcf;border-radius:4px;background:#fff;color:#222;font-size:13px;';
+                wrapper.append(caption, input);
+                grid.appendChild(wrapper);
+                return input;
+            }
+
+            addField('cgoods_no', '商品子编号', '', 'text');
+            addField('weight', '重量（kg）', '', 'number');
+            addField('purchase_price', '采购价', '', 'number');
+            addField('length', '长度（cm）', '', 'number');
+            addField('width', '宽度（cm）', '', 'number');
+            addField('height', '高度（cm）', '', 'number');
+            addField('price', '售价（₽）', '', 'number');
+            addField('exchange_rate', '汇率', '14', 'number');
+            addField('is_lighting', '商品类型', '0', 'select', [['0', '非灯具'], ['1', '灯具']]);
+            addField('wb_category_name', 'WB 类目 ID', '', 'text');
+            addField('ozon_category_name', 'OZON 类目 ID（可选）', '', 'text');
+            form.appendChild(grid);
+
+            const actionRow = document.createElement('div');
+            actionRow.style.cssText = 'display:flex;align-items:center;gap:10px;margin-top:10px;';
+            const submit = document.createElement('button');
+            submit.type = 'submit';
+            submit.textContent = '开始计算';
+            submit.style.cssText = 'min-width:104px;height:34px;padding:0 12px;border:0;border-radius:4px;background:#12b8a6;color:#fff;font-size:12px;font-weight:600;cursor:pointer;';
+            const status = document.createElement('span');
+            status.setAttribute('role', 'status');
+            status.style.cssText = 'min-width:0;color:#666;font-size:11px;line-height:1.4;';
+            actionRow.append(submit, status);
+            form.appendChild(actionRow);
+
+            const result = document.createElement('div');
+            result.id = 'wb-budget-results';
+            result.style.cssText = 'margin-top:4px;';
+            form.addEventListener('submit', event => {
+                event.preventDefault();
+                submitBudgetCalculation();
+            });
+            body.append(form, result);
+            dialog.append(header, body);
+            document.body.appendChild(dialog);
+
+            const responsiveStyle = document.createElement('style');
+            responsiveStyle.textContent = '@media(max-width:520px){#wb-budget-calculator-float{top:8px!important;right:8px!important;width:calc(100vw - 16px)!important;max-height:calc(100vh - 16px)!important}#wb-budget-fields{grid-template-columns:minmax(0,1fr)!important}}';
+            document.head.appendChild(responsiveStyle);
+
+            header.addEventListener('pointerdown', event => {
+                if (event.target.closest('button')) return;
+                event.preventDefault();
+                const rect = dialog.getBoundingClientRect();
+                const startX = event.clientX;
+                const startY = event.clientY;
+                const startLeft = rect.left;
+                const startTop = rect.top;
+                dialog.style.left = startLeft + 'px';
+                dialog.style.top = startTop + 'px';
+                dialog.style.right = 'auto';
+                const onMove = moveEvent => {
+                    const left = Math.max(0, Math.min(window.innerWidth - dialog.offsetWidth, startLeft + moveEvent.clientX - startX));
+                    const top = Math.max(0, Math.min(window.innerHeight - 44, startTop + moveEvent.clientY - startY));
+                    dialog.style.left = left + 'px';
+                    dialog.style.top = top + 'px';
+                };
+                const onUp = () => {
+                    window.removeEventListener('pointermove', onMove);
+                    window.removeEventListener('pointerup', onUp);
+                };
+                window.addEventListener('pointermove', onMove);
+                window.addEventListener('pointerup', onUp);
             });
             document.addEventListener('keydown', event => {
                 if (event.key === 'Escape' && budgetModalEl?.style.display !== 'none') closeBudgetModal();
             });
-            document.body.appendChild(overlay);
 
-            budgetModalEl = overlay;
-            budgetFrameEl = frame;
+            budgetModalEl = dialog;
+            budgetFormEl = form;
+            budgetTitleEl = productTitle;
+            budgetStatusEl = status;
+            budgetResultEl = result;
+            budgetSubmitEl = submit;
         }
 
-        function openBudgetModal(url) {
+        function openBudgetModal(product) {
             ensureBudgetModal();
             if (budgetModalEl.style.display === 'none') {
                 budgetModalReturnFocus = document.activeElement;
-                budgetModalPreviousOverflow = document.documentElement.style.overflow;
             }
+            const dimensions = defaultPackageDimensions(product);
+            const weight = Number(getByPath(product, 'weight'));
+            const price = calcSellPrice(pickProductPrice(product), getDiscountPercent());
+            let savedRate = '14';
+            try {
+                if (typeof GM_getValue === 'function') savedRate = GM_getValue('wb_budget_exchange_rate', '14');
+            } catch (error) {}
+            const values = {
+                cgoods_no: '',
+                weight: Number.isFinite(weight) ? String(weight) : '',
+                purchase_price: '',
+                length: dimensions.length,
+                width: dimensions.width,
+                height: dimensions.height,
+                price,
+                exchange_rate: savedRate,
+                is_lighting: '0',
+                ozon_category_name: '',
+                wb_category_name: findWbCategoryId(product),
+            };
+            for (const [name, value] of Object.entries(values)) {
+                const input = budgetFormEl.elements[name];
+                if (input) input.value = value == null ? '' : String(value);
+            }
+            budgetTitleEl.textContent = product?.name || '当前商品';
+            budgetResultEl.replaceChildren();
+            budgetSubmitEl.disabled = false;
+            budgetSubmitEl.textContent = '开始计算';
+            setBudgetStatus(values.wb_category_name ? '已填入商品数据，可调整后计算。' : '请确认或填写 WB 类目 ID。', values.wb_category_name ? 'success' : 'loading');
             budgetModalEl.style.display = 'flex';
-            document.documentElement.style.overflow = 'hidden';
-            budgetFrameEl.src = url;
-            budgetModalEl.querySelector('button[aria-label="关闭预算计算器"]')?.focus({ preventScroll: true });
+            budgetFormEl.elements.purchase_price?.focus({ preventScroll: true });
         }
 
         function queueInsert() {
@@ -1001,30 +1399,7 @@
                 `;
                 budgetBtn.onclick = (e) => {
                     e.stopPropagation();
-                    const weightRaw    = getByPath(product, 'weight');
-                    const volumeRaw    = getByPath(product, 'volume');
-                    const productRaw   = pickProductPrice(product);
-                    const subjName     = getByPath(product, '__card__.subj_name');
-                    const subjRootName = getByPath(product, '__card__.subj_root_name');
-
-                    const weight = (weightRaw == null || weightRaw === '') ? '' : Number(weightRaw).toFixed(1);
-                    const volume = (volumeRaw == null || volumeRaw === '') ? '' : (Number(volumeRaw) / 10).toFixed(1);
-                    const discount = getDiscountPercent();
-                    const price = calcSellPrice(productRaw, discount);
-
-                    const url = new URL(BUDGET_URL);
-                    if (weight) url.searchParams.set('wb_weight', weight);
-                    if (volume) url.searchParams.set('wb_volume', volume);
-                    if (price)  url.searchParams.set('wb_price', price);
-                    if (subjRootName) url.searchParams.set('wb_subj_root_name', String(subjRootName));
-                    if (subjName)     url.searchParams.set('wb_subj_name', String(subjName));
-
-                    console.log('[WB预算] productRaw:', productRaw,
-                                ' discount:', discount + '%',
-                                ' price:', price,
-                                ' root:', subjRootName, ' subj:', subjName,
-                                ' URL:', url.toString());
-                    openBudgetModal(url.toString());
+                    openBudgetModal(product);
                 };
                 actionRow.appendChild(budgetBtn);
 
@@ -1445,6 +1820,18 @@
     // 预算计算器端
     // ============================================================
     function initBudgetCalculator() {
+        let categoryTreeAttempts = 0;
+        const categoryTreeTimer = setInterval(() => {
+            categoryTreeAttempts += 1;
+            const pageWindow = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
+            const tree = pageWindow.wb_category_tree || window.wb_category_tree;
+            if (Array.isArray(tree) && tree.length) {
+                cacheWbCategoryTree(tree);
+                clearInterval(categoryTreeTimer);
+            } else if (categoryTreeAttempts >= 100) {
+                clearInterval(categoryTreeTimer);
+            }
+        }, 200);
 
         async function fillWeight(weight) {
             if (!weight) return;
@@ -1491,6 +1878,7 @@
                 console.warn('[预算填充] 页面类目树未就绪，等待 20 秒仍未找到 wb_category_tree');
                 return;
             }
+            cacheWbCategoryTree(tree);
 
             const norm = s => String(s || '')
                 .replace(/[（(].*?[)）]/g, '')
