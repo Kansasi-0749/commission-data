@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WB 商品数据窗口
 // @namespace    http://tampermonkey.net/
-// @version      13.12
+// @version      13.13
 // @updateURL    https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/wb-product-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/wb-product-panel.user.js
 // @description  拦截 Wildberries 商品接口，显示商品数据；一键跳转预算计算器并自动填充重量/尺寸/售价/类目
@@ -537,6 +537,10 @@
         let detailObserver = null;
         let insertQueued = false;
         let panelClosed = false;
+        let budgetModalEl = null;
+        let budgetFrameEl = null;
+        let budgetModalReturnFocus = null;
+        let budgetModalPreviousOverflow = '';
         let lastRouteHref = location.href;
         let routeHooksInstalled = false;
 
@@ -549,6 +553,93 @@
             }
         }
 
+        function closeBudgetModal() {
+            if (!budgetModalEl || budgetModalEl.style.display === 'none') return;
+            budgetModalEl.style.display = 'none';
+            if (budgetFrameEl) budgetFrameEl.src = 'about:blank';
+            if (document.documentElement) document.documentElement.style.overflow = budgetModalPreviousOverflow;
+            if (budgetModalReturnFocus?.isConnected) budgetModalReturnFocus.focus({ preventScroll: true });
+            budgetModalReturnFocus = null;
+        }
+
+        function ensureBudgetModal() {
+            if (budgetModalEl) return;
+
+            const overlay = document.createElement('div');
+            overlay.id = 'wb-budget-modal-overlay';
+            overlay.setAttribute('role', 'presentation');
+            overlay.style.cssText = `
+                position:fixed; inset:0; z-index:2147483647;
+                display:none; align-items:center; justify-content:center;
+                padding:12px; box-sizing:border-box;
+                background:rgba(18,18,18,.48);
+            `;
+
+            const dialog = document.createElement('section');
+            dialog.setAttribute('role', 'dialog');
+            dialog.setAttribute('aria-modal', 'true');
+            dialog.setAttribute('aria-label', '预算计算器');
+            dialog.style.cssText = `
+                display:flex; flex-direction:column; overflow:hidden;
+                width:min(1180px, calc(100vw - 24px));
+                height:min(850px, calc(100vh - 24px));
+                min-height:240px; box-sizing:border-box;
+                background:#fff; border-radius:8px;
+                box-shadow:0 12px 48px rgba(0,0,0,.24);
+            `;
+
+            const header = document.createElement('header');
+            header.style.cssText = `
+                display:flex; align-items:center; justify-content:space-between;
+                flex:0 0 42px; padding:0 14px; box-sizing:border-box;
+                color:#fff; background:#cb11ab; font:600 14px/1.2 -apple-system,"Segoe UI",Arial,sans-serif;
+            `;
+            const title = document.createElement('span');
+            title.textContent = '预算计算器';
+
+            const closeButton = document.createElement('button');
+            closeButton.type = 'button';
+            closeButton.setAttribute('aria-label', '关闭预算计算器');
+            closeButton.title = '关闭';
+            closeButton.textContent = '✕';
+            closeButton.style.cssText = `
+                display:grid; place-items:center; width:30px; height:30px;
+                padding:0; border:0; color:inherit; background:transparent;
+                font:400 18px/1 Arial,sans-serif; cursor:pointer;
+            `;
+            closeButton.addEventListener('click', closeBudgetModal);
+            header.append(title, closeButton);
+
+            const frame = document.createElement('iframe');
+            frame.title = '预算计算器';
+            frame.style.cssText = 'display:block; flex:1 1 auto; min-height:0; width:100%; border:0; background:#fff;';
+
+            dialog.append(header, frame);
+            overlay.appendChild(dialog);
+            overlay.addEventListener('mousedown', event => {
+                if (event.target === overlay) closeBudgetModal();
+            });
+            document.addEventListener('keydown', event => {
+                if (event.key === 'Escape' && budgetModalEl?.style.display !== 'none') closeBudgetModal();
+            });
+            document.body.appendChild(overlay);
+
+            budgetModalEl = overlay;
+            budgetFrameEl = frame;
+        }
+
+        function openBudgetModal(url) {
+            ensureBudgetModal();
+            if (budgetModalEl.style.display === 'none') {
+                budgetModalReturnFocus = document.activeElement;
+                budgetModalPreviousOverflow = document.documentElement.style.overflow;
+            }
+            budgetModalEl.style.display = 'flex';
+            document.documentElement.style.overflow = 'hidden';
+            budgetFrameEl.src = url;
+            budgetModalEl.querySelector('button[aria-label="关闭预算计算器"]')?.focus({ preventScroll: true });
+        }
+
         function queueInsert() {
             if (insertQueued) return;
             insertQueued = true;
@@ -559,6 +650,7 @@
         }
 
         function leaveDetailMode() {
+            closeBudgetModal();
             uninstallNetworkHooks();
             detailObserver?.disconnect();
             detailObserver = null;
@@ -903,7 +995,6 @@
                     flex:1; padding:6px 8px; font-size:12px; font-weight:600;
                     background:#cb11ab; color:#fff; border:none; border-radius:5px; cursor:pointer;
                 `;
-                let budgetBtnFeedbackTimer = null;
                 budgetBtn.onclick = (e) => {
                     e.stopPropagation();
                     const weightRaw    = getByPath(product, 'weight');
@@ -929,26 +1020,7 @@
                                 ' price:', price,
                                 ' root:', subjRootName, ' subj:', subjName,
                                 ' URL:', url.toString());
-                    const popupFeatures = 'popup=yes,width=1180,height=850,resizable=yes,scrollbars=yes';
-                    const calculatorWindow = window.open(
-                        url.toString(),
-                        'wb-budget-calculator',
-                        popupFeatures,
-                    );
-                    if (calculatorWindow) {
-                        calculatorWindow.focus();
-                        return;
-                    }
-
-                    console.warn('[WB预算] 浏览器拦截了计算器弹窗');
-                    budgetBtn.textContent = '请允许弹窗';
-                    budgetBtn.title = '请允许 Wildberries 页面弹出窗口，然后重试';
-                    clearTimeout(budgetBtnFeedbackTimer);
-                    budgetBtnFeedbackTimer = setTimeout(() => {
-                        if (!budgetBtn.isConnected) return;
-                        budgetBtn.textContent = '预算计算器';
-                        budgetBtn.title = '';
-                    }, 2500);
+                    openBudgetModal(url.toString());
                 };
                 actionRow.appendChild(budgetBtn);
 
