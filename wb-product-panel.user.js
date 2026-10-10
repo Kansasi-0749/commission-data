@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WB 商品数据窗口
 // @namespace    http://tampermonkey.net/
-// @version      13.11
+// @version      13.2
 // @updateURL    https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/wb-product-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/wb-product-panel.user.js
 // @description  拦截 Wildberries 商品接口，显示商品数据；一键跳转预算计算器并自动填充重量/尺寸/售价/类目
@@ -539,6 +539,9 @@
         let panelClosed = false;
         let lastRouteHref = location.href;
         let routeHooksInstalled = false;
+        let routePollTimer = null;
+        let productLoadTimer = null;
+        let productLoadNm = null;
 
         function ensureDetailState() {
             if (!window.__WB_CAPTURED__ || typeof window.__WB_CAPTURED__ !== 'object') {
@@ -547,6 +550,24 @@
             if (!window.__WB_CARD__ || typeof window.__WB_CARD__ !== 'object') {
                 window.__WB_CARD__ = Object.create(null);
             }
+        }
+
+        function clearProductLoadTimeout() {
+            if (productLoadTimer !== null) window.clearTimeout(productLoadTimer);
+            productLoadTimer = null;
+            productLoadNm = null;
+        }
+
+        function scheduleProductLoadTimeout(nmId) {
+            if (productLoadTimer !== null && productLoadNm === nmId) return;
+            clearProductLoadTimeout();
+            productLoadNm = nmId;
+            productLoadTimer = window.setTimeout(() => {
+                productLoadTimer = null;
+                if (pageMode !== 'detail' || getCurrentNmId() !== nmId) return;
+                if (window.__WB_CAPTURED__?.[nmId]) return;
+                renderFields(null, false, '商品数据接口未返回，请刷新或稍后重试。');
+            }, 10000);
         }
 
         function queueInsert() {
@@ -563,6 +584,7 @@
             detailObserver?.disconnect();
             detailObserver = null;
             insertQueued = false;
+            clearProductLoadTimeout();
             panelEl?.remove();
             panelEl = null;
             bodyEl = null;
@@ -646,7 +668,11 @@
         function switchPageMode() {
             const nextMode = isDetailRoute() ? 'detail' : null;
             if (nextMode === pageMode) {
-                if (nextMode === 'detail') queueInsert();
+                if (nextMode === 'detail') {
+                    lastRenderedNm = null;
+                    tryRender();
+                    queueInsert();
+                }
                 return;
             }
             if (pageMode === 'detail') leaveDetailMode();
@@ -664,25 +690,22 @@
         function installRouteHooks() {
             if (routeHooksInstalled) return;
             routeHooksInstalled = true;
-            for (const method of ['pushState', 'replaceState']) {
-                const original = history[method];
-                if (typeof original !== 'function') continue;
-                history[method] = function (...args) {
-                    const result = original.apply(this, args);
-                    handleRouteChange();
-                    return result;
-                };
-            }
             window.addEventListener('popstate', handleRouteChange);
             window.addEventListener('hashchange', handleRouteChange);
+
+            // Some WB page/extension environments expose read-only History methods.
+            // Poll the URL as a safe fallback instead of replacing pushState/replaceState.
+            routePollTimer = window.setInterval(() => {
+                if (location.href !== lastRouteHref) handleRouteChange();
+            }, 400);
         }
 
-        function renderFields(product, isLoading) {
+        function renderFields(product, isLoading, message = '') {
             ensurePanel();
             if (!product) {
                 bodyEl.innerHTML = isLoading
                     ? `<div style="color:#999">加载中…</div>`
-                    : `<div style="color:#999">等待数据中…</div>`;
+                    : `<div style="color:#999">${message || '等待数据中…'}</div>`;
             } else {
                 bodyEl.innerHTML = '';
                 const nameEl = document.createElement('div');
@@ -1123,13 +1146,23 @@
         function tryRender() {
             if (pageMode !== 'detail') return;
             const nmId = getCurrentNmId();
-            if (!nmId) { renderFields(null, false); return; }
+            if (!nmId) {
+                clearProductLoadTimeout();
+                renderFields(null, false);
+                return;
+            }
             if (nmId !== lastRenderedNm) {
                 lastRenderedNm = nmId;
+                scheduleProductLoadTimeout(nmId);
                 renderFields(null, true);
             }
             const rec = window.__WB_CAPTURED__?.[nmId];
-            if (!rec) { renderFields(null, true); return; }
+            if (!rec) {
+                scheduleProductLoadTimeout(nmId);
+                renderFields(null, true);
+                return;
+            }
+            clearProductLoadTimeout();
             const product = mergeCategory(rec.data, nmId);
             renderFields(product, false);
         }
@@ -1281,7 +1314,11 @@
         }
 
         if (isDetailRoute()) installNetworkHooks();
-        installRouteHooks();
+        try {
+            installRouteHooks();
+        } catch (error) {
+            console.warn('[WB路由] 路由监听初始化失败，将继续执行首次加载', error);
+        }
         let bootstrapped = false;
         function bootstrap() {
             if (bootstrapped) return;
