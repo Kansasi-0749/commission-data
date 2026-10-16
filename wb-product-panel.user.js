@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WB 商品数据窗口
 // @namespace    http://tampermonkey.net/
-// @version      13.2
+// @version      14.0
 // @updateURL    https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/wb-product-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/wb-product-panel.user.js
 // @description  拦截 Wildberries 商品接口，显示商品数据；一键跳转预算计算器并自动填充重量/尺寸/售价/类目
@@ -394,12 +394,10 @@
         }
 
         const FIELDS = [
-            { label: '体积', path: 'volume', transform: v => (Number(v) / 10).toFixed(1) + ' 升' },
-            { label: '尺寸体积', path: '__card__.package_volume' },
-            { label: '重量', path: 'weight', transform: v => Number(v).toFixed(1) + ' kg' },
-            { label: '库存', path: 'totalQuantity' },
-            { label: '二级类目', path: '__card__.subj_name' },
-            { label: '一级类目', path: '__card__.subj_root_name' },
+            { label: '体积', path: 'volume', transform: v => (Number(v) / 10).toFixed(1) + ' 升', compact: true },
+            { label: '尺寸体积', path: '__card__.package_volume', compact: true },
+            { label: '重量', path: 'weight', transform: v => Number(v).toFixed(1) + ' kg', compact: true },
+            { label: '库存', path: 'totalQuantity', compact: true },
             { label: '上架时间', path: '__card__.create_date',
               transform: v => {
                   const d = new Date(v);
@@ -412,6 +410,11 @@
         function getCurrentNmId() {
             const m = location.pathname.match(/\/catalog\/(\d+)\/detail/);
             return m ? m[1] : null;
+        }
+        function getSupplierId(product) {
+            const raw = getByPath(product, 'supplierId');
+            const id = raw == null ? '' : String(raw).trim();
+            return /^\d+$/.test(id) && Number(id) > 0 ? id : '';
         }
         function getNmFromCardUrl(url) {
             const text = String(url || '');
@@ -431,15 +434,29 @@
             if (typeof value === 'object') return JSON.stringify(value);
             return String(value);
         }
-        function indexProducts(data) {
-            if (!isDetailRoute()) return 0;
+        function indexProducts(data, sourceUrl = '', requestNmId = '') {
             ensureDetailState();
-            const products = data?.products || data?.data?.products || [];
+            const products = [data?.products, data?.data?.products, data?.data?.data?.products]
+                .find(Array.isArray) || [];
             const time = Date.now();
             for (const p of products) {
-                const id = String(p.id ?? p.nmId ?? p.nm_id ?? '');
-                if (id) window.__WB_CAPTURED__[id] = { nm: id, time, data: p };
+                if (!p || typeof p !== 'object') continue;
+                const itemId = p.id ?? p.nmId ?? p.nm_id;
+                const id = String(itemId || (products.length === 1 ? requestNmId : ''));
+                if (id) {
+                    window.__WB_CAPTURED__[id] = { nm: id, time, data: p };
+                    if (sourceUrl) window.__WB_DETAIL_URLS__[id] = String(sourceUrl);
+                }
             }
+            if (sourceUrl && requestNmId && !window.__WB_DETAIL_URLS__[requestNmId]) {
+                window.__WB_DETAIL_URLS__[requestNmId] = String(sourceUrl);
+            }
+            console.debug('[WB抓取] detail 响应已处理', {
+                products: products.length,
+                requestNmId,
+                currentNmId: getCurrentNmId(),
+                matchedCurrent: Boolean(window.__WB_CAPTURED__?.[getCurrentNmId()]),
+            });
             return products.length;
         }
         function parseMeasure(value) {
@@ -510,11 +527,18 @@
                 package_volume: getPackageVolume(card),
             }};
         }
-        function storeCardData(url, data) {
-            if (!data || !isDetailRoute()) return;
+        function storeCardData(url, data, requestNmId = '') {
+            if (!data) return '';
             ensureDetailState();
-            const nm = getNmFromCardUrl(url) || getCurrentNmId();
-            if (nm) window.__WB_CARD__[nm] = data;
+            const nm = getNmFromCardUrl(url) || String(requestNmId || '');
+            if (!nm) return '';
+            window.__WB_CARD__[nm] = data;
+            if (url) window.__WB_CARD_URLS__[nm] = String(url);
+            console.debug('[WB抓取] card 响应已处理', {
+                nmId: nm,
+                currentNmId: getCurrentNmId(),
+            });
+            return nm;
         }
         function copyText(text) {
             if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text);
@@ -533,6 +557,7 @@
         }
 
         let panelEl = null, bodyEl = null;
+        let panelPlacementNm = null;
         let pageMode = null;
         let detailObserver = null;
         let insertQueued = false;
@@ -550,6 +575,12 @@
             if (!window.__WB_CARD__ || typeof window.__WB_CARD__ !== 'object') {
                 window.__WB_CARD__ = Object.create(null);
             }
+            if (!window.__WB_DETAIL_URLS__ || typeof window.__WB_DETAIL_URLS__ !== 'object') {
+                window.__WB_DETAIL_URLS__ = Object.create(null);
+            }
+            if (!window.__WB_CARD_URLS__ || typeof window.__WB_CARD_URLS__ !== 'object') {
+                window.__WB_CARD_URLS__ = Object.create(null);
+            }
         }
 
         function clearProductLoadTimeout() {
@@ -566,7 +597,11 @@
                 productLoadTimer = null;
                 if (pageMode !== 'detail' || getCurrentNmId() !== nmId) return;
                 if (window.__WB_CAPTURED__?.[nmId]) return;
-                renderFields(null, false, '商品数据接口未返回，请刷新或稍后重试。');
+                if (window.__WB_CARD__?.[nmId]) {
+                    renderFields(mergeCategory({}, nmId), false, '', '详情数据未返回，可点右上角刷新');
+                } else {
+                    renderFields(null, false, '商品数据接口未返回，请刷新或稍后重试。');
+                }
             }, 10000);
         }
 
@@ -580,7 +615,6 @@
         }
 
         function leaveDetailMode() {
-            uninstallNetworkHooks();
             detailObserver?.disconnect();
             detailObserver = null;
             insertQueued = false;
@@ -588,11 +622,15 @@
             panelEl?.remove();
             panelEl = null;
             bodyEl = null;
+            panelPlacementNm = null;
             lastRenderedNm = null;
             panelClosed = false;
             window.__WB_CAPTURED__ = Object.create(null);
             window.__WB_CARD__ = Object.create(null);
+            window.__WB_DETAIL_URLS__ = Object.create(null);
+            window.__WB_CARD_URLS__ = Object.create(null);
             recoveredCardUrls.clear();
+            recoveredDetailUrls.clear();
         }
 
         function ensurePanel() {
@@ -601,25 +639,27 @@
             panelEl = document.createElement('div');
             panelEl.id = 'wb-data-panel';
             panelEl.style.cssText = `
-                margin: 10px 0 0 0;
-                width: 100%;
+                margin: 0;
+                width: 230px;
+                max-width: calc(100vw - 24px);
                 box-sizing: border-box;
                 background: #fff;
                 color: #222;
                 border-radius: 8px;
                 box-shadow: 0 2px 10px rgba(0,0,0,.08);
                 font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
-                font-size: 12px;
-                overflow: hidden;
+                font-size: 13px;
+                overflow-x: hidden;
+                overflow-y: auto;
                 display: none;
             `;
             const header = document.createElement('div');
             header.style.cssText = `
-                padding: 7px 10px;
+                padding: 6px 8px;
                 background: #cb11ab;
                 color: #fff;
                 font-weight: 600;
-                font-size: 12px;
+                font-size: 13px;
                 display: flex;
                 justify-content: space-between;
                 align-items: center;
@@ -627,18 +667,51 @@
             const title = document.createElement('span');
             title.textContent = 'WB 商品数据';
             header.appendChild(title);
+            const headerActions = document.createElement('div');
+            headerActions.style.cssText = `display:flex; align-items:center; gap:8px;`;
+            const refreshBtn = document.createElement('button');
+            refreshBtn.type = 'button';
+            refreshBtn.setAttribute('aria-label', '刷新商品数据');
+            refreshBtn.title = '重新读取页面已捕获的商品数据';
+            refreshBtn.textContent = '↻';
+            refreshBtn.style.cssText = `border:0; padding:0 2px; background:transparent; color:inherit; cursor:pointer; font-size:17px; line-height:1; opacity:.9;`;
+            refreshBtn.onclick = async e => {
+                e.stopPropagation();
+                if (refreshBtn.disabled) return;
+                const nmId = getCurrentNmId();
+                if (!nmId) return;
+                refreshBtn.disabled = true;
+                refreshBtn.textContent = '…';
+                try {
+                    const found = await refreshProductData(nmId);
+                    refreshBtn.textContent = found ? '✓' : '!';
+                    refreshBtn.title = found ? '已从页面数据刷新' : '页面中尚未捕获当前商品数据';
+                } catch (error) {
+                    refreshBtn.textContent = '!';
+                    refreshBtn.title = '读取页面商品数据失败，请查看控制台';
+                    console.warn('[WB刷新] 读取已捕获商品数据失败', error);
+                } finally {
+                    window.setTimeout(() => {
+                        refreshBtn.disabled = false;
+                        refreshBtn.textContent = '↻';
+                        refreshBtn.title = '重新读取页面已捕获的商品数据';
+                    }, 1400);
+                }
+            };
+            headerActions.appendChild(refreshBtn);
             const closeBtn = document.createElement('button');
             closeBtn.type = 'button';
             closeBtn.setAttribute('aria-label', '关闭商品数据');
             closeBtn.textContent = '✕';
-            closeBtn.style.cssText = `border:0; padding:0; background:transparent; color:inherit; cursor:pointer; font-size:12px; opacity:.85;`;
+            closeBtn.style.cssText = `border:0; padding:0; background:transparent; color:inherit; cursor:pointer; font-size:15px; opacity:.85;`;
             closeBtn.onclick = () => {
                 panelClosed = true;
                 panelEl.style.display = 'none';
             };
-            header.appendChild(closeBtn);
+            headerActions.appendChild(closeBtn);
+            header.appendChild(headerActions);
             bodyEl = document.createElement('div');
-            bodyEl.style.cssText = `padding: 8px 10px;`;
+            bodyEl.style.cssText = `padding: 6px 8px;`;
             panelEl.appendChild(header);
             panelEl.appendChild(bodyEl);
         }
@@ -655,7 +728,7 @@
             panelClosed = false;
             if (!detailObserver && document.body) {
                 detailObserver = new MutationObserver(queueInsert);
-                detailObserver.observe(document.body, {
+                detailObserver.observe(document.documentElement, {
                     childList: true,
                     subtree: true,
                 });
@@ -663,6 +736,7 @@
             lastRenderedNm = null;
             tryRender();
             loadRemoteCommissionData();
+            scheduleProductDataRecovery(getCurrentNmId());
         }
 
         function switchPageMode() {
@@ -672,6 +746,7 @@
                     lastRenderedNm = null;
                     tryRender();
                     queueInsert();
+                    scheduleProductDataRecovery(getCurrentNmId());
                 }
                 return;
             }
@@ -700,7 +775,7 @@
             }, 400);
         }
 
-        function renderFields(product, isLoading, message = '') {
+        function renderFields(product, isLoading, message = '', detailPending = false) {
             ensurePanel();
             if (!product) {
                 bodyEl.innerHTML = isLoading
@@ -708,59 +783,205 @@
                     : `<div style="color:#999">${message || '等待数据中…'}</div>`;
             } else {
                 bodyEl.innerHTML = '';
-                const nameEl = document.createElement('div');
-                nameEl.textContent = product.name || '—';
-                nameEl.style.cssText = `margin-bottom:6px; font-weight:600; color:#333; word-break:break-all; font-size:12px;`;
-                bodyEl.appendChild(nameEl);
-
+                if (detailPending) {
+                    const pendingEl = document.createElement('div');
+                    pendingEl.textContent = typeof detailPending === 'string'
+                        ? detailPending
+                        : '正在等待商品详情数据';
+                    pendingEl.style.cssText = `margin-bottom:4px; color:#888; font-size:11px; line-height:1.3;`;
+                    bodyEl.appendChild(pendingEl);
+                }
                 const subjName = getByPath(product, '__card__.subj_name');
                 const subjRootName = getByPath(product, '__card__.subj_root_name');
                 const categoryData = findRemoteCategoryData(subjRootName, subjName);
+                const measureGrid = document.createElement('div');
+                measureGrid.style.cssText = `
+                    display:grid; grid-template-columns:repeat(2,minmax(0,1fr));
+                    gap:4px; align-items:stretch;
+                `;
+                bodyEl.appendChild(measureGrid);
 
-                const appendFieldRow = (label, value) => {
+                const appendFieldRow = (label, value, compact = false, trailing = null) => {
                     const val = value === undefined || value === null || value === '' ? '—' : String(value);
                     const row = document.createElement('div');
-                    row.style.cssText = `
-                        display:flex; align-items:center; gap:6px;
-                        padding:3px 0; border-bottom:1px dashed #eee;
+                    row.style.cssText = compact ? `
+                        min-width:0; min-height:40px; box-sizing:border-box;
+                        display:flex; flex-direction:column; justify-content:center; gap:2px;
+                        padding:4px 6px; border-left:2px solid #e8c4e2; border-radius:4px;
+                        background:#f8f7f8;
+                    ` : `
+                        min-width:0; display:grid;
+                        grid-template-columns:${trailing ? 'auto minmax(0,1fr) auto' : 'auto minmax(0,1fr)'};
+                        align-items:center; gap:${trailing ? '4px' : '6px'}; padding:4px 0;
+                        border-bottom:1px solid #eee;
                     `;
-                    const labelEl = document.createElement('span');
-                    labelEl.textContent = label;
-                    labelEl.style.cssText = `color:#666; white-space:nowrap;`;
+                    if (label) {
+                        const labelEl = document.createElement('span');
+                        labelEl.textContent = label;
+                        labelEl.style.cssText = `
+                            grid-column:1; color:#777; white-space:nowrap;
+                            font-size:11px; line-height:1.2;
+                        `;
+                        row.appendChild(labelEl);
+                    }
                     const valEl = document.createElement('span');
                     valEl.textContent = val;
                     valEl.style.cssText = `
-                        font-weight:600; word-break:break-all; text-align:right;
-                        flex:1; min-width:0;
+                        grid-column:2; min-width:0; font-weight:600;
+                        overflow-wrap:${trailing ? 'normal' : 'anywhere'};
+                        white-space:${trailing ? 'nowrap' : 'normal'};
+                        overflow:${trailing ? 'hidden' : 'visible'};
+                        text-overflow:${trailing ? 'ellipsis' : 'clip'}; text-align:left;
+                        font-size:${compact ? '13px' : (trailing ? '11px' : '12px')}; line-height:1.2;
                     `;
-                    const copyBtn = document.createElement('button');
-                    copyBtn.textContent = '复制';
-                    copyBtn.style.cssText = `
-                        flex-shrink:0; padding:2px 6px; font-size:11px;
-                        background:#f3e6f1; color:#cb11ab;
-                        border:1px solid #e7c9e3; border-radius:4px; cursor:pointer;
+                    if (compact) row.appendChild(valEl);
+                    else {
+                        row.appendChild(valEl);
+                    }
+                    if (trailing) {
+                        trailing.style.gridColumn = '3';
+                        row.appendChild(trailing);
+                    }
+                    (compact ? measureGrid : bodyEl).appendChild(row);
+                };
+
+                const appendCategoryCell = (label, russianName, chineseName, canCopy = false) => {
+                    const cell = document.createElement('div');
+                    cell.style.cssText = `
+                        min-width:0; padding:3px 0 4px;
                     `;
-                    copyBtn.onclick = (e) => {
-                        e.stopPropagation();
-                        copyText(val).then(() => {
-                            copyBtn.textContent = '已复制';
-                            setTimeout(() => { copyBtn.textContent = '复制'; }, 1200);
-                        }).catch(() => alert('复制失败，请手动复制。'));
+
+                    const labelEl = document.createElement('div');
+                    labelEl.textContent = label;
+                    labelEl.style.cssText = `color:#666; font-size:11px; line-height:1.2; margin-bottom:2px;`;
+
+                    const valueRow = document.createElement('div');
+                    valueRow.style.cssText = `
+                        display:grid; grid-template-columns:${canCopy ? 'minmax(0,1fr) 32px' : 'minmax(0,1fr)'};
+                        align-items:start; gap:4px; min-width:0;
+                    `;
+
+                    const russianEl = document.createElement('span');
+                    russianEl.textContent = russianName == null || russianName === '' ? '—' : String(russianName);
+                    russianEl.style.cssText = `
+                        min-width:0; font-size:13px; line-height:1.25; font-weight:600;
+                        overflow-wrap:anywhere;
+                    `;
+
+                    const chineseEl = document.createElement('div');
+                    chineseEl.textContent = chineseName == null || chineseName === '' ? '—' : String(chineseName);
+                    chineseEl.style.cssText = `
+                        font-size:12px; line-height:1.25; font-weight:600;
+                        color:#333; overflow-wrap:anywhere;
+                    `;
+
+                    const makeCopyButton = (value, title) => {
+                        const copyBtn = document.createElement('button');
+                        copyBtn.type = 'button';
+                        copyBtn.textContent = '复制';
+                        copyBtn.title = title;
+                        copyBtn.style.cssText = `
+                            width:32px; box-sizing:border-box; padding:3px 2px;
+                            font-size:11px; line-height:1.2; white-space:nowrap;
+                            background:#f3e6f1; color:#a30d89;
+                            border:1px solid #e7c9e3; border-radius:4px; cursor:pointer;
+                        `;
+                        copyBtn.onclick = e => {
+                            e.stopPropagation();
+                            const text = String(value == null ? '' : value).trim() || '—';
+                            copyText(text).then(() => {
+                                copyBtn.textContent = '完成';
+                                setTimeout(() => { copyBtn.textContent = '复制'; }, 1200);
+                            }).catch(() => alert('复制失败，请手动复制。'));
+                        };
+                        return copyBtn;
                     };
-                    row.appendChild(labelEl);
-                    row.appendChild(valEl);
-                    row.appendChild(copyBtn);
-                    bodyEl.appendChild(row);
+
+                    valueRow.appendChild(russianEl);
+                    if (canCopy) valueRow.appendChild(makeCopyButton(russianName, '复制二级类目俄语'));
+
+                    const chineseRow = document.createElement('div');
+                    chineseRow.style.cssText = `
+                        display:${canCopy ? 'grid' : 'block'};
+                        grid-template-columns:minmax(0,1fr) 32px;
+                        align-items:start; gap:4px; min-width:0; margin-top:2px;
+                    `;
+                    chineseRow.appendChild(chineseEl);
+                    if (canCopy) chineseRow.appendChild(makeCopyButton(chineseName, '复制二级类目中文'));
+
+                    cell.appendChild(labelEl);
+                    cell.appendChild(valueRow);
+                    cell.appendChild(chineseRow);
+                    return cell;
+                };
+
+                const appendCategoryGrid = () => {
+                    const categoryGrid = document.createElement('div');
+                    categoryGrid.style.cssText = `
+                        display:grid; grid-template-columns:repeat(2,minmax(0,1fr));
+                        column-gap:8px; align-items:start; margin:4px 0 2px;
+                        padding:4px 0 3px; border-top:1px solid #eee;
+                        border-bottom:1px solid #eee;
+                    `;
+                    categoryGrid.appendChild(appendCategoryCell(
+                        '一级类目', subjRootName, categoryData && categoryData.rootChinese
+                    ));
+                    categoryGrid.appendChild(appendCategoryCell(
+                        '二级类目', subjName, categoryData && categoryData.secondChinese, true
+                    ));
+                    bodyEl.appendChild(categoryGrid);
+                };
+
+                const makeCardCopyButtons = () => {
+                    const group = document.createElement('div');
+                    group.style.cssText = `display:flex; align-items:center; gap:4px;`;
+                    const addButton = (label, fieldName, title) => {
+                        const button = document.createElement('button');
+                        button.type = 'button';
+                        button.textContent = label;
+                        button.title = title;
+                        button.style.cssText = `
+                            flex:0 0 34px; width:34px; height:20px; box-sizing:border-box;
+                            padding:1px 2px; font-size:11px; line-height:16px;
+                            white-space:nowrap; background:#f3e6f1; color:#a30d89;
+                            border:1px solid #e7c9e3; border-radius:4px; cursor:pointer;
+                        `;
+                        const cardValue = getCardField(
+                            window.__WB_CARD__?.[getCurrentNmId()],
+                            [fieldName]
+                        );
+                        button.disabled = !String(cardValue == null ? '' : cardValue).trim();
+                        if (button.disabled) {
+                            button.title = `${title}（卡片数据尚未加载）`;
+                            button.style.cssText += 'opacity:.55;cursor:not-allowed;';
+                        }
+                        button.onclick = e => {
+                            e.stopPropagation();
+                            const currentValue = getCardField(
+                                window.__WB_CARD__?.[getCurrentNmId()],
+                                [fieldName]
+                            );
+                            const text = currentValue == null ? '' : String(currentValue);
+                            if (!text.trim()) return;
+                            copyText(text).then(() => {
+                                button.textContent = '完成';
+                                setTimeout(() => { button.textContent = label; }, 1200);
+                            }).catch(() => alert('复制失败，请手动复制。'));
+                        };
+                        group.appendChild(button);
+                    };
+                    addButton('标题', 'imt_name', '复制商品标题');
+                    addButton('详情', 'description', '复制商品详情');
+                    return group;
                 };
 
                 for (const f of FIELDS) {
+                    if (f.path === '__card__.create_date') appendCategoryGrid();
                     const raw = getByPath(product, f.path);
-                    appendFieldRow(f.label, formatValue(f, raw));
-                    if (f.path === '__card__.subj_name') {
-                        appendFieldRow('二级类目（中文）', categoryData && categoryData.secondChinese);
-                    } else if (f.path === '__card__.subj_root_name') {
-                        appendFieldRow('一级类目（中文）', categoryData && categoryData.rootChinese);
-                    }
+                    const cardCopyButtons = f.path === '__card__.create_date'
+                        ? makeCardCopyButtons()
+                        : null;
+                    appendFieldRow(f.label, formatValue(f, raw), f.compact === true, cardCopyButtons);
                 }
 
                 // ===== 佣金行 =====
@@ -769,21 +990,21 @@
 
                 const commRow = document.createElement('div');
                 commRow.style.cssText = `
-                    margin-top:6px; display:flex; flex-direction:column; gap:3px;
-                    padding:4px 0; border-bottom:1px dashed #eee;
+                    margin-top:4px; display:flex; align-items:center; gap:6px;
+                    min-width:0; padding:4px 0; border-bottom:1px solid #eee;
                 `;
                 const commLabel = document.createElement('div');
-                commLabel.textContent = '佣金（按二级类目）';
-                commLabel.style.cssText = `color:#666; font-size:11px;`;
+                commLabel.textContent = '佣金';
+                commLabel.style.cssText = `color:#666; font-size:11px; white-space:nowrap;`;
 
                 const commValueRow = document.createElement('div');
-                commValueRow.style.cssText = `display:flex; gap:6px; align-items:center; flex-wrap:wrap;`;
+                commValueRow.style.cssText = `display:flex; min-width:0; gap:3px; align-items:center; flex-wrap:wrap;`;
 
                 function mkTag(text, val, color) {
                     const el = document.createElement('span');
                     el.style.cssText = `
                         display:inline-flex; align-items:center; gap:3px;
-                        padding:2px 6px; border-radius:4px; font-size:11px;
+                        padding:2px 4px; border-radius:4px; font-size:11px; line-height:1.2;
                         background:${color}12; color:${color};
                         border:1px solid ${color}33;
                     `;
@@ -798,7 +1019,7 @@
                 } else {
                     const nf = document.createElement('span');
                     nf.textContent = subjName ? `未匹配到：${subjName}` : '（无二级类目）';
-                    nf.style.cssText = `color:#999; font-size:11px;`;
+                    nf.style.cssText = `color:#999; font-size:12px;`;
                     commValueRow.appendChild(nf);
                 }
 
@@ -810,7 +1031,7 @@
                     const statusEl = document.createElement('div');
                     statusEl.textContent = remoteCommissionStatus.message;
                     statusEl.style.cssText = `
-                        padding:4px 0; font-size:11px; line-height:1.4;
+                        padding:3px 0; font-size:11px; line-height:1.3;
                         color:${remoteCommissionStatus.kind === 'error' ? '#b42318' : '#888'};
                     `;
                     bodyEl.appendChild(statusEl);
@@ -819,21 +1040,31 @@
                 // ===== WB折扣 输入 =====
                 const coefRow = document.createElement('div');
                 coefRow.style.cssText = `
-                    margin-top:6px; display:flex; align-items:center; gap:6px;
-                    padding:4px 0; border-bottom:1px dashed #eee;
+                    margin-top:3px; display:flex; align-items:center;
+                    gap:2px; min-width:0; padding:3px 0;
+                `;
+
+                const coefLeft = document.createElement('div');
+                coefLeft.style.cssText = `
+                    display:flex; align-items:center; gap:2px;
+                    flex:1 1 auto; min-width:0;
                 `;
                 const coefLabel = document.createElement('span');
                 coefLabel.textContent = 'WB折扣';
-                coefLabel.style.cssText = `color:#666; white-space:nowrap;`;
+                coefLabel.style.cssText = `
+                    display:flex; align-items:center; justify-content:center;
+                    flex:0 0 auto; height:24px; min-width:0; box-sizing:border-box;
+                    color:#666; font-size:11.5px; line-height:1; white-space:nowrap;
+                `;
 
                 const coefWrap = document.createElement('div');
                 coefWrap.style.cssText = `
-                    display:inline-flex; align-items:center;
-                    height: 24px;
+                    display:flex; align-items:center; justify-content:center;
+                    flex:1 1 48px; width:48px; min-width:42px; height:24px; box-sizing:border-box;
                     border: 1px solid #e0e0e0;
                     border-radius: 5px;
                     background: #fafafa;
-                    padding: 0 6px;
+                    padding: 0 1px;
                     transition: border-color .15s, box-shadow .15s, background .15s;
                 `;
 
@@ -844,14 +1075,14 @@
                 coefInput.max = '99';
                 coefInput.value = String(getDiscountPercent());
                 coefInput.style.cssText = `
-                    width: 38px;
+                    width: 100%; min-width:0; flex:1 1 0; box-sizing:border-box;
                     border: none;
                     outline: none;
                     background: transparent;
-                    font-size: 12px;
+                    font-size: 14px;
                     font-weight: 600;
                     color: #cb11ab;
-                    text-align: right;
+                    text-align: center;
                     padding: 0;
                     -moz-appearance: textfield;
                     appearance: textfield;
@@ -880,8 +1111,8 @@
                 percentSign.textContent = '%';
                 percentSign.style.cssText = `
                     color: #999;
-                    font-size: 11px;
-                    margin-left: 2px;
+                    font-size: 12px;
+                    margin-left: 1px;
                     user-select: none;
                 `;
 
@@ -904,28 +1135,28 @@
                 coefWrap.appendChild(coefInput);
                 coefWrap.appendChild(percentSign);
 
-                const coefHint = document.createElement('span');
-                coefHint.textContent = '售价 = 价格 / 100 / (1 - 折扣)';
-                coefHint.style.cssText = `
-                    color:#999; font-size:11px; margin-left:auto;
-                    white-space:nowrap;
+                coefLeft.appendChild(coefLabel);
+                coefLeft.appendChild(coefWrap);
+                coefRow.appendChild(coefLeft);
+
+                const actionGroup = document.createElement('div');
+                actionGroup.style.cssText = `
+                    display:flex; align-items:center; flex:0 0 60%;
+                    gap:1px; min-width:0; margin-left:auto;
                 `;
 
-                coefRow.appendChild(coefLabel);
-                coefRow.appendChild(coefWrap);
-                coefRow.appendChild(coefHint);
-                bodyEl.appendChild(coefRow);
-
-                // ===== 两个按钮 =====
-                const actionRow = document.createElement('div');
-                actionRow.style.cssText = `margin-top:8px; display:flex; gap:6px;`;
+                const actionButtonStyle = `
+                    display:flex; align-items:center; justify-content:center;
+                    flex:1 1 0; width:0; min-width:0; height:24px; box-sizing:border-box;
+                    margin:0; padding:0; font-size:10.5px; line-height:1; font-weight:600; white-space:nowrap;
+                    background:#cb11ab; color:#fff; border:none;
+                    border-radius:5px; cursor:pointer;
+                `;
 
                 const budgetBtn = document.createElement('button');
-                budgetBtn.textContent = '预算计算器';
-                budgetBtn.style.cssText = `
-                    flex:1; padding:6px 8px; font-size:12px; font-weight:600;
-                    background:#cb11ab; color:#fff; border:none; border-radius:5px; cursor:pointer;
-                `;
+                budgetBtn.type = 'button';
+                budgetBtn.textContent = '预算计算';
+                budgetBtn.style.cssText = actionButtonStyle;
                 budgetBtn.onclick = (e) => {
                     e.stopPropagation();
                     const weightRaw    = getByPath(product, 'weight');
@@ -953,70 +1184,90 @@
                                 ' URL:', url.toString());
                     window.open(url.toString(), '_blank');
                 };
-                actionRow.appendChild(budgetBtn);
+                actionGroup.appendChild(budgetBtn);
 
-                const copyRowBtn = document.createElement('button');
-                copyRowBtn.textContent = '复制表格行';
-                copyRowBtn.style.cssText = `
-                    flex:1; padding:6px 8px; font-size:12px; font-weight:600;
-                    background:#f3e6f1; color:#cb11ab;
-                    border:1px solid #e7c9e3; border-radius:5px; cursor:pointer;
-                `;
-                copyRowBtn.onclick = (e) => {
+                const copyAllBtn = document.createElement('button');
+                copyAllBtn.type = 'button';
+                copyAllBtn.textContent = '复制全部';
+                copyAllBtn.style.cssText = actionButtonStyle;
+                copyAllBtn.onclick = e => {
                     e.stopPropagation();
 
                     const subjName = getByPath(product, '__card__.subj_name');
-                    const comm = subjName ? findCommission(subjName) : null;
-                    const fboCommission = (comm && comm[0] != null) ? comm[0] : '';
+                    const commission = (categoryData && categoryData.commission)
+                        || (subjName ? findCommission(subjName) : null);
+                    const fboCommission = (commission && commission[0] != null) ? commission[0] : '';
 
-                    const weightRaw  = getByPath(product, 'weight');
-                    const volumeRaw  = getByPath(product, 'volume');
-                    const priceRaw   = pickProductPrice(product);
-                    const priceStr   = priceRaw == null ? '' : String(priceRaw / 100);
-
+                    const weightRaw = getByPath(product, 'weight');
+                    const volumeRaw = getByPath(product, 'volume');
+                    const priceRaw = pickProductPrice(product);
+                    const priceStr = priceRaw == null ? '' : String(priceRaw / 100);
                     const weight = (weightRaw == null || weightRaw === '') ? '' : Number(weightRaw);
                     const volume = (volumeRaw == null || volumeRaw === '') ? null : (Number(volumeRaw) / 10);
-                    const dims   = volume != null ? LWH_RULE(volume) : { length: '', width: '', height: '' };
+                    const dims = volume != null ? LWH_RULE(volume) : { length: '', width: '', height: '' };
 
-                    // 14 列：本FBO佣金 / 按重量 / 重量 / 长 / 宽 / 高 / 采购价(空) / 空×6 / 售价
                     const cells = [
-                        fboCommission,   // 1
-                        '按重量',        // 2
-                        weight,          // 3
-                        dims.length,     // 4
-                        dims.width,      // 5
-                        dims.height,     // 6
-                        '',              // 7  采购价
-                        '',              // 8
-                        '',              // 9
-                        '',              // 10
-                        '',              // 11
-                        '',              // 12
-                        '',              // 13
-                        priceStr         // 14 售价
+                        fboCommission,
+                        '按重量',
+                        weight,
+                        dims.length,
+                        dims.width,
+                        dims.height,
+                        '',
+                        '',
+                        '',
+                        '',
+                        '',
+                        '',
+                        '',
+                        priceStr,
                     ];
-
-                    const line = cells.map(v => v == null ? '' : String(v)).join('\t');
-
-                    console.log('[复制表格行] 内容:', JSON.stringify(line));
+                    const line = cells.map(value => value == null ? '' : String(value)).join('\t');
 
                     copyText(line).then(() => {
-                        copyRowBtn.textContent = '已复制';
-                        setTimeout(() => { copyRowBtn.textContent = '复制表格行'; }, 1200);
+                        copyAllBtn.textContent = '已复制';
+                        setTimeout(() => { copyAllBtn.textContent = '复制全部'; }, 1200);
                     }).catch(() => alert('复制失败，请手动复制：\n' + line));
                 };
-                actionRow.appendChild(copyRowBtn);
+                actionGroup.appendChild(copyAllBtn);
 
-                bodyEl.appendChild(actionRow);
+                const supplierId = getSupplierId(product);
+                const sellerHomeBtn = document.createElement('button');
+                sellerHomeBtn.type = 'button';
+                sellerHomeBtn.textContent = '店铺首页';
+                sellerHomeBtn.title = supplierId
+                    ? `打开店铺首页（${supplierId}）`
+                    : '商品详情接口未返回有效 supplierId';
+                sellerHomeBtn.style.cssText = actionButtonStyle;
+                sellerHomeBtn.disabled = !supplierId;
+                if (!supplierId) sellerHomeBtn.style.cssText += 'opacity:.55;cursor:not-allowed;';
+                sellerHomeBtn.onclick = e => {
+                    e.stopPropagation();
+                    if (!supplierId) return;
+                    window.open(
+                        `https://www.wildberries.ru/seller/${supplierId}`,
+                        '_blank',
+                        'noopener,noreferrer'
+                    );
+                };
+                actionGroup.appendChild(sellerHomeBtn);
+                coefRow.appendChild(actionGroup);
+                bodyEl.appendChild(coefRow);
             }
             insertIntoPage();
         }
 
+        function findDetailAside() {
+            const containers = Array.from(document.querySelectorAll(
+                '[class^="productPageAsideSticky"], .product-page__aside-sticky'
+            ));
+            return containers.find(el => el.getClientRects().length > 0) || containers[0] || null;
+        }
+
         function findBuyBlock() {
-            const btns = Array.from(document.querySelectorAll('button'));
-            const target = btns.find(b => {
-                const t = (b.textContent || '').trim();
-                return t === 'Добавить в корзину' || t === 'Купить сейчас';
+            const target = Array.from(document.querySelectorAll('button')).find(button => {
+                const text = (button.textContent || '').trim();
+                return text === 'Добавить в корзину' || text === 'Купить сейчас';
             });
             if (!target) return null;
 
@@ -1028,10 +1279,8 @@
                 if (text.includes('₽') || text.includes('Добавить в корзину') || text.includes('Купить сейчас')) {
                     const up = parent.parentElement;
                     if (up && up !== document.body) {
-                        const r = up.getBoundingClientRect();
-                        if (r.width >= 200 && r.width <= window.innerWidth * 0.8) {
-                            return up;
-                        }
+                        const rect = up.getBoundingClientRect();
+                        if (rect.width >= 200 && rect.width <= window.innerWidth * 0.8) return up;
                     }
                     return parent;
                 }
@@ -1040,83 +1289,28 @@
             return null;
         }
 
-        function normalizeVisibleText(value) {
-            return String(value || '').replace(/[\u00a0\u202f]/g, ' ').replace(/\s+/g, ' ').trim();
-        }
-
-        function isHorizontalLayout(el) {
-            const style = window.getComputedStyle(el);
-            if ((style.display === 'flex' || style.display === 'inline-flex') && style.flexDirection.startsWith('row')) {
-                return true;
-            }
-            if (style.display === 'grid' || style.display === 'inline-grid') {
-                return style.gridTemplateColumns.trim().split(/\s+/).filter(Boolean).length > 1;
-            }
-            return false;
-        }
-
-        function findActionGroup(buttons, root) {
-            if (!buttons.length) return null;
-            let group = buttons[0].parentElement;
-            while (group && group !== root && !buttons.every(button => group.contains(button))) {
-                group = group.parentElement;
-            }
-            return group && group !== root ? group : null;
-        }
-
-        function getAfterActionPoint(group, root) {
-            let anchor = group;
-            while (anchor.parentElement && anchor.parentElement !== root && isHorizontalLayout(anchor.parentElement)) {
-                anchor = anchor.parentElement;
-            }
-
-            let parent = anchor.parentElement;
-            if (!parent) return null;
-            if (parent === root && isHorizontalLayout(root) && root.parentElement) {
-                parent = root.parentElement;
-                anchor = root;
-            }
-
-            let before = anchor.nextSibling;
-            if (before === panelEl) before = panelEl.nextSibling;
-            return { parent, before };
-        }
-
         function findInsertionPoint() {
-            if (pageMode !== 'detail') return null;
+            const aside = findDetailAside();
+            if (aside) {
+                return { parent: aside, before: aside.firstChild === panelEl ? panelEl.nextSibling : aside.firstChild };
+            }
+
             const sellerInfo = document.querySelector('section[aria-label="Информация о продавце"]');
             const sellerWrap = sellerInfo && sellerInfo.parentElement;
-            const summary = sellerWrap && sellerWrap.parentElement;
-            if (summary) {
-                const buttons = Array.from(summary.querySelectorAll('button'));
-                const primaryActions = buttons.filter(b => {
-                    const text = normalizeVisibleText(b.textContent);
-                    return text === 'Добавить в корзину' || text === 'Купить сейчас';
-                });
-                const favoriteButton = buttons.find(b => b.getAttribute('aria-label') === 'Добавить в избранное');
-                const actionButtons = primaryActions.length ? primaryActions : (favoriteButton ? [favoriteButton] : []);
-                const actionGroup = findActionGroup(actionButtons, summary);
-                if (actionGroup) {
-                    const point = getAfterActionPoint(actionGroup, summary);
-                    if (point) return point;
-                }
-
-                if (sellerWrap.parentElement) {
-                    return { parent: sellerWrap.parentElement, before: sellerWrap };
-                }
+            if (sellerWrap && sellerWrap.parentElement) {
+                return { parent: sellerWrap.parentElement, before: sellerWrap };
             }
 
             const buyBlock = findBuyBlock();
             if (buyBlock && buyBlock.parentElement) {
-                let before = buyBlock.nextSibling;
-                if (before === panelEl) before = panelEl.nextSibling;
-                return { parent: buyBlock.parentElement, before };
+                return { parent: buyBlock.parentElement, before: buyBlock };
             }
 
             const favoriteButton = document.querySelector('button[aria-label="Добавить в избранное"]');
-            if (!favoriteButton) return null;
-            const favoriteGroup = findActionGroup([favoriteButton], document.body);
-            return favoriteGroup ? getAfterActionPoint(favoriteGroup, document.body) : null;
+            if (favoriteButton && favoriteButton.parentElement) {
+                return { parent: favoriteButton.parentElement, before: favoriteButton };
+            }
+            return null;
         }
 
         function insertIntoPage() {
@@ -1124,8 +1318,11 @@
             const point = findInsertionPoint();
             if (!point) return;
 
-            if (panelEl.parentElement === point.parent && panelEl.nextSibling === point.before && panelEl.style.display === 'block') return;
+            const nmId = getCurrentNmId();
+            if (panelEl.parentElement === point.parent && panelEl.nextSibling === point.before &&
+                panelEl.style.display === 'block' && panelPlacementNm === nmId) return;
 
+            panelPlacementNm = nmId;
             panelEl.style.position = '';
             panelEl.style.right = '';
             panelEl.style.bottom = '';
@@ -1136,7 +1333,8 @@
             panelEl.style.maxWidth = '100%';
             panelEl.style.minWidth = '0';
             panelEl.style.maxHeight = 'none';
-            panelEl.style.overflowY = '';
+            panelEl.style.margin = '0 0 10px';
+            panelEl.style.overflowY = 'visible';
             panelEl.style.display = 'block';
 
             point.parent.insertBefore(panelEl, point.before);
@@ -1157,14 +1355,16 @@
                 renderFields(null, true);
             }
             const rec = window.__WB_CAPTURED__?.[nmId];
-            if (!rec) {
+            const card = window.__WB_CARD__?.[nmId];
+            if (!rec && !card) {
                 scheduleProductLoadTimeout(nmId);
                 renderFields(null, true);
                 return;
             }
-            clearProductLoadTimeout();
-            const product = mergeCategory(rec.data, nmId);
-            renderFields(product, false);
+            if (rec) clearProductLoadTimeout();
+            else scheduleProductLoadTimeout(nmId);
+            const product = mergeCategory(rec ? rec.data : {}, nmId);
+            renderFields(product, false, '', !rec);
         }
         function onDataArrived() { tryRender(); }
 
@@ -1177,64 +1377,106 @@
         let wrappedFetch = null;
         let wrappedOpen = null;
         let wrappedSend = null;
-        function loadExistingDetailData() {
-            if (pageMode !== 'detail' || !origFetch || !window.performance?.getEntriesByType) return;
+        function getDetailRequestUrls(nmId) {
             const urls = new Set();
-            for (const entry of performance.getEntriesByType('resource')) {
-                const url = String(entry?.name || '');
-                if (url && url.includes(TARGET_DETAIL)) urls.add(url);
-            }
+            const knownUrl = window.__WB_DETAIL_URLS__?.[nmId];
+            if (knownUrl) urls.add(String(knownUrl));
 
-            for (const url of urls) {
-                if (recoveredDetailUrls.has(url)) continue;
-                recoveredDetailUrls.add(url);
-                origFetch(url, { credentials: 'include' })
-                    .then(resp => resp.ok ? resp.json() : null)
-                    .then(data => {
-                        if (data && pageMode === 'detail' && isDetailRoute()) {
-                            indexProducts(data);
-                            onDataArrived();
-                        }
-                    })
-                    .catch(() => {});
+            const entries = window.performance?.getEntriesByType
+                ? performance.getEntriesByType('resource').map(entry => String(entry?.name || ''))
+                    .filter(url => url.includes(TARGET_DETAIL))
+                : [];
+            const matching = entries.filter(url => getNmFromCardUrl(url) === nmId);
+            for (const url of matching.slice(-3)) urls.add(url);
+
+            if (!urls.size) {
+                for (const url of entries.slice(-3)) urls.add(url);
             }
+            return urls;
         }
 
-        function loadExistingCardData() {
-            if (pageMode !== 'detail') return;
-            const nmId = getCurrentNmId();
-            if (!nmId || !origFetch || !window.performance?.getEntriesByType) return;
-
+        function getCardRequestUrls(nmId) {
             const urls = new Set();
-            for (const entry of performance.getEntriesByType('resource')) {
-                const url = String(entry?.name || '');
-                if (!url) continue;
-                if (url.includes(TARGET_CARD)) {
-                    if (getNmFromCardUrl(url) === nmId) urls.add(url);
-                    continue;
-                }
-                const imageMarker = `/${nmId}/images/`;
-                const imageIndex = url.indexOf(imageMarker);
-                if (imageIndex >= 0) {
-                    urls.add(url.slice(0, imageIndex) + `/${nmId}/info/ru/card.json`);
+            const knownUrl = window.__WB_CARD_URLS__?.[nmId];
+            if (knownUrl) urls.add(String(knownUrl));
+            if (window.performance?.getEntriesByType) {
+                for (const entry of performance.getEntriesByType('resource')) {
+                    const url = String(entry?.name || '');
+                    if (!url) continue;
+                    if (url.includes(TARGET_CARD) && getNmFromCardUrl(url) === nmId) {
+                        urls.add(url);
+                        continue;
+                    }
+                    const imageMarker = `/${nmId}/images/`;
+                    const imageIndex = url.indexOf(imageMarker);
+                    if (imageIndex >= 0) {
+                        urls.add(url.slice(0, imageIndex) + `/${nmId}/info/ru/card.json`);
+                    }
                 }
             }
             urls.add(`${location.origin}/catalog/${nmId}/info/ru/card.json`);
+            return urls;
+        }
 
-            for (const url of urls) {
-                if (recoveredCardUrls.has(url)) continue;
-                recoveredCardUrls.add(url);
-                origFetch(url, { credentials: 'include' })
+        function loadExistingDetailData(targetNmId = getCurrentNmId()) {
+            if (pageMode !== 'detail' || !targetNmId || !origFetch || window.__WB_CAPTURED__?.[targetNmId]) return;
+            for (const url of getDetailRequestUrls(targetNmId)) {
+                if (recoveredDetailUrls.has(url)) continue;
+                recoveredDetailUrls.add(url);
+                origFetch.call(PAGE_WINDOW, url, { credentials: 'include', cache: 'no-store' })
                     .then(resp => resp.ok ? resp.json() : null)
                     .then(data => {
-                        if (data && pageMode === 'detail' && isDetailRoute()) {
-                            storeCardData(url, data);
+                        if (data) {
+                            indexProducts(data, url, targetNmId);
                             onDataArrived();
                         }
                     })
-                    .catch(() => {});
+                    .catch(error => console.debug('[WB补抓] detail 请求失败', error))
+                    .finally(() => recoveredDetailUrls.delete(url));
             }
         }
+
+        function loadExistingCardData(targetNmId = getCurrentNmId()) {
+            if (pageMode !== 'detail' || !targetNmId || !origFetch || window.__WB_CARD__?.[targetNmId]) return;
+            for (const url of getCardRequestUrls(targetNmId)) {
+                if (recoveredCardUrls.has(url)) continue;
+                recoveredCardUrls.add(url);
+                origFetch.call(PAGE_WINDOW, url, { credentials: 'include', cache: 'no-store' })
+                    .then(resp => resp.ok ? resp.json() : null)
+                    .then(data => {
+                        if (data) {
+                            storeCardData(url, data, targetNmId);
+                            onDataArrived();
+                        }
+                    })
+                    .catch(error => console.debug('[WB补抓] card.json 请求失败', error))
+                    .finally(() => recoveredCardUrls.delete(url));
+            }
+        }
+
+        function scheduleProductDataRecovery(nmId) {
+            if (!nmId) return;
+            for (const delay of [100, 700, 1800]) {
+                window.setTimeout(() => {
+                    if (pageMode !== 'detail' || getCurrentNmId() !== nmId) return;
+                    if (!window.__WB_CAPTURED__?.[nmId]) loadExistingDetailData(nmId);
+                    if (!window.__WB_CARD__?.[nmId]) loadExistingCardData(nmId);
+                }, delay);
+            }
+        }
+
+        function refreshProductData(nmId) {
+            if (!nmId || pageMode !== 'detail' || getCurrentNmId() !== nmId) return false;
+
+            ensureDetailState();
+            const hasDetail = Boolean(window.__WB_CAPTURED__?.[nmId]);
+            const hasCard = Boolean(window.__WB_CARD__?.[nmId]);
+            if (!hasDetail && !hasCard) return false;
+
+            onDataArrived();
+            return true;
+        }
+
         function installNetworkHooks() {
             if (networkHooksInstalled) return;
             networkHooksInstalled = true;
@@ -1244,23 +1486,28 @@
 
             if (typeof origFetch === 'function') {
                 wrappedFetch = async function (...args) {
+                    const input = args[0];
+                    const url = (input && input.url) || String(input || '');
+                    const requestNmId = getNmFromCardUrl(url) || getCurrentNmId() || '';
+                    if (url.includes(TARGET_DETAIL) && requestNmId) {
+                        ensureDetailState();
+                        window.__WB_DETAIL_URLS__[requestNmId] = url;
+                    }
                     const resp = await origFetch.apply(this, args);
-                    if (!isDetailRoute()) return resp;
+                    if (!resp.ok) return resp;
                     try {
-                        const url = (args[0] && args[0].url) || String(args[0] || '');
                         if (url.includes(TARGET_DETAIL)) {
                             const clone = resp.clone();
                             clone.json().then(data => {
-                                if (isDetailRoute()) { indexProducts(data); onDataArrived(); }
+                                indexProducts(data, url, requestNmId);
+                                onDataArrived();
                             }).catch(e => console.warn('[WB抓取] detail 解析失败', e));
                         }
                         if (url.includes(TARGET_CARD)) {
                             const clone = resp.clone();
                             clone.json().then(data => {
-                                if (isDetailRoute()) {
-                                    storeCardData(url, data);
-                                    onDataArrived();
-                                }
+                                storeCardData(url, data, requestNmId);
+                                onDataArrived();
                             }).catch(e => console.warn('[WB抓取] card.json 解析失败', e));
                         }
                     } catch (e) {}
@@ -1271,22 +1518,31 @@
 
             wrappedOpen = function (method, url, ...rest) {
                 this.__wb_url = String(url || '');
+                this.__wb_nm = getNmFromCardUrl(this.__wb_url) || getCurrentNmId() || '';
+                if (this.__wb_url.includes(TARGET_DETAIL) && this.__wb_nm) {
+                    ensureDetailState();
+                    window.__WB_DETAIL_URLS__[this.__wb_nm] = this.__wb_url;
+                }
                 return origOpen.call(this, method, url, ...rest);
             };
             wrappedSend = function (...args) {
                 this.addEventListener('load', function () {
                     try {
-                        if (!isDetailRoute()) return;
+                        if (this.status < 200 || this.status >= 300) return;
                         const url = String(this.__wb_url || '');
+                        const requestNmId = String(this.__wb_nm || '');
                         let data = null;
                         if (url.includes(TARGET_DETAIL) || url.includes(TARGET_CARD)) {
                             if (this.responseType === '' || this.responseType === 'text') data = JSON.parse(this.responseText);
                             else if (this.responseType === 'json') data = this.response;
                             else return;
                         }
-                        if (url.includes(TARGET_DETAIL) && data) { indexProducts(data); onDataArrived(); }
+                        if (url.includes(TARGET_DETAIL) && data) {
+                            indexProducts(data, url, requestNmId);
+                            onDataArrived();
+                        }
                         if (url.includes(TARGET_CARD) && data) {
-                            storeCardData(url, data);
+                            storeCardData(url, data, requestNmId);
                             onDataArrived();
                         }
                     } catch (e) {
@@ -1299,21 +1555,7 @@
             PAGE_WINDOW.XMLHttpRequest.prototype.send = wrappedSend;
         }
 
-        function uninstallNetworkHooks() {
-            if (!networkHooksInstalled) return;
-            if (wrappedFetch && PAGE_WINDOW.fetch === wrappedFetch) PAGE_WINDOW.fetch = origFetch;
-            if (wrappedOpen && PAGE_WINDOW.XMLHttpRequest.prototype.open === wrappedOpen) PAGE_WINDOW.XMLHttpRequest.prototype.open = origOpen;
-            if (wrappedSend && PAGE_WINDOW.XMLHttpRequest.prototype.send === wrappedSend) PAGE_WINDOW.XMLHttpRequest.prototype.send = origSend;
-            networkHooksInstalled = false;
-            origFetch = null;
-            origOpen = null;
-            origSend = null;
-            wrappedFetch = null;
-            wrappedOpen = null;
-            wrappedSend = null;
-        }
-
-        if (isDetailRoute()) installNetworkHooks();
+        installNetworkHooks();
         try {
             installRouteHooks();
         } catch (error) {
@@ -1328,14 +1570,6 @@
             }
             bootstrapped = true;
             switchPageMode();
-            if (pageMode === 'detail') {
-                setTimeout(loadExistingDetailData, 100);
-                setTimeout(loadExistingDetailData, 800);
-                setTimeout(loadExistingDetailData, 2000);
-                setTimeout(loadExistingCardData, 100);
-                setTimeout(loadExistingCardData, 800);
-                setTimeout(loadExistingCardData, 2000);
-            }
         }
         window.addEventListener('DOMContentLoaded', bootstrap, { once: true });
         if (document.readyState !== 'loading') bootstrap();
