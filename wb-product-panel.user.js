@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WB 商品数据窗口
 // @namespace    http://tampermonkey.net/
-// @version      14.1
+// @version      15.0
 // @updateURL    https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/wb-product-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/wb-product-panel.user.js
 // @description  拦截 Wildberries 商品接口，显示商品数据；一键跳转预算计算器并自动填充重量/尺寸/售价/类目
@@ -120,75 +120,57 @@
             return /^\/catalog\/\d+\/detail(?:\.aspx)?\/?$/i.test(location.pathname);
         }
 
-        // 佣金表只从 GitHub 远程数据或油猴缓存加载。
-        let COMMISSION_MAP = {};
-        const __COMMISSION_NORM_CACHE = new Map();
-        function normCategoryKey(s) {
-            const raw = String(s || '');
-            if (__COMMISSION_NORM_CACHE.has(raw)) return __COMMISSION_NORM_CACHE.get(raw);
-            const key = raw
-                .replace(/[（(].*?[)）]/g, '')
-                .replace(/\s+/g, '')
-                .toLowerCase();
-            __COMMISSION_NORM_CACHE.set(raw, key);
-            return key;
-        }
-        function findCommission(subjName) {
-            const key = normCategoryKey(subjName);
-            if (!key) return null;
-
-            for (const [k, v] of Object.entries(COMMISSION_MAP)) {
-                if (normCategoryKey(k) === key) return v;
-            }
-            for (const [k, v] of Object.entries(COMMISSION_MAP)) {
-                if (normCategoryKey(k).includes(key)) return v;
-            }
-            return null;
-        }
-
         // 佣金表只从 GitHub 远程文件或油猴缓存读取。
-        const REMOTE_COMMISSION_URL = 'https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/%E6%9C%AC%E5%9C%9FWB_%E7%B1%BB%E7%9B%AE%E4%BD%A3%E9%87%91.json';
-        const REMOTE_COMMISSION_API_URL = 'https://api.github.com/repos/Kansasi-0749/commission-data/contents/%E6%9C%AC%E5%9C%9FWB_%E7%B1%BB%E7%9B%AE%E4%BD%A3%E9%87%91.json?ref=main';
-        const REMOTE_COMMISSION_CACHE_KEY = 'wb_commission_github_v1';
+        const REMOTE_COMMISSION_URL = 'https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/WB%E7%B1%BB%E7%9B%AE%E4%BD%A3%E9%87%91%E8%A1%A8.json';
+        const REMOTE_COMMISSION_API_URL = 'https://api.github.com/repos/Kansasi-0749/commission-data/contents/WB%E7%B1%BB%E7%9B%AE%E4%BD%A3%E9%87%91%E8%A1%A8.json?ref=main';
+        const REMOTE_COMMISSION_CACHE_KEY = 'wb_commission_github_v4';
         const REMOTE_COMMISSION_CACHE_TTL = 6 * 60 * 60 * 1000;
         let remoteCommissionLoadStarted = false;
         let remoteCommissionStatus = { kind: 'loading', message: '正在连接 GitHub 佣金表…' };
-        let REMOTE_CATEGORY_MAP = {};
-        let REMOTE_SECOND_CATEGORY_MAP = {};
+        let REMOTE_CATEGORY_ID_MAP = {};
 
-        function normalizeCommissionMap(map) {
-            const normalized = {};
-            for (const [name, value] of Object.entries(map || {})) {
-                const values = Array.isArray(value) ? value.map(Number) : [];
-                if (name && values.length >= 3 && values.slice(0, 3).every(Number.isFinite)) {
-                    normalized[name] = values.slice(0, 3);
-                }
-            }
-            if (!Object.keys(normalized).length) throw new Error('佣金表没有有效记录');
-            return normalized;
+        function normalizeCategoryId(value) {
+            if (typeof value === 'number') return Number.isSafeInteger(value) ? String(value) : '';
+            const raw = String(value == null ? '' : value).trim();
+            if (!/^\d+$/.test(raw)) return '';
+            const numeric = Number(raw);
+            return Number.isSafeInteger(numeric) ? String(numeric) : '';
         }
 
-        function makeRemoteCategoryKey(rootName, secondName) {
-            const rootKey = normCategoryKey(rootName);
-            const secondKey = normCategoryKey(secondName);
-            return rootKey && secondKey ? rootKey + '\u0000' + secondKey : '';
+        function makeRemoteIdCategoryKey(rootId, subjectId) {
+            const rootKey = normalizeCategoryId(rootId);
+            const subjectKey = normalizeCategoryId(subjectId);
+            return rootKey && subjectKey ? rootKey + ':' + subjectKey : '';
+        }
+
+        function readCommissionValues(record) {
+            const source = record && (record['佣金'] || record.commission);
+            const values = Array.isArray(source)
+                ? source.map(Number)
+                : source && typeof source === 'object'
+                    ? [source['本FBO'], source['本FBS'], source['跨FBS']].map(Number)
+                    : [];
+            return values.length >= 3 && values.slice(0, 3).every(Number.isFinite)
+                ? values.slice(0, 3)
+                : [];
         }
 
         function normalizeCategoryRecordMap(map) {
             const normalized = {};
             for (const [key, record] of Object.entries(map || {})) {
                 if (!key || !record || typeof record !== 'object') continue;
-                const commission = Array.isArray(record.commission)
-                    ? record.commission.map(Number)
-                    : [];
-                const secondRussian = String(record.secondRussian || '').trim();
-                if (!secondRussian || commission.length < 3 || !commission.slice(0, 3).every(Number.isFinite)) continue;
+                const rootId = normalizeCategoryId(record.rootId);
+                const subjectId = normalizeCategoryId(record.subjectId);
+                const commission = readCommissionValues(record);
+                if (!rootId || !subjectId) continue;
                 normalized[key] = {
+                    rootId,
+                    subjectId,
                     rootRussian: String(record.rootRussian || '').trim(),
                     rootChinese: String(record.rootChinese || '').trim(),
-                    secondRussian,
+                    secondRussian: String(record.secondRussian || '').trim(),
                     secondChinese: String(record.secondChinese || '').trim(),
-                    commission: commission.slice(0, 3),
+                    commission,
                 };
             }
             if (!Object.keys(normalized).length) throw new Error('类目表没有有效记录');
@@ -196,79 +178,62 @@
         }
 
         function extractRemoteCommissionData(payload) {
-            const categories = payload && payload.categories;
-            if (!categories || typeof categories !== 'object') {
-                throw new Error('佣金 JSON 缺少 categories');
-            }
+            if (!Array.isArray(payload)) throw new Error('佣金 JSON 必须是一级类目数组');
 
-            const commissionMap = {};
             const categoryMap = {};
-            const secondCandidates = {};
-            for (const [rootRussian, firstCategory] of Object.entries(categories)) {
-                const secondCategories = firstCategory && firstCategory['二级类目'];
-                if (!secondCategories || typeof secondCategories !== 'object') continue;
-                const rootChinese = firstCategory && firstCategory['中文'];
-                for (const [secondRussian, record] of Object.entries(secondCategories)) {
-                    const commission = record && record['佣金'];
-                    if (!commission) continue;
-                    const values = [
-                        commission['本FBO'],
-                        commission['本FBS'],
-                        commission['跨FBS'],
-                    ];
-                    if (!values.every(value => Number.isFinite(Number(value)))) continue;
-
-                    const categoryRecord = {
-                        rootRussian,
-                        rootChinese,
-                        secondRussian,
-                        secondChinese: record && record['中文'],
-                        commission: values,
-                    };
-                    const categoryKey = makeRemoteCategoryKey(rootRussian, secondRussian);
-                    if (categoryKey) categoryMap[categoryKey] = categoryRecord;
-
-                    const secondKey = normCategoryKey(secondRussian);
-                    if (secondKey) {
-                        if (!Object.prototype.hasOwnProperty.call(secondCandidates, secondKey)) {
-                            secondCandidates[secondKey] = categoryRecord;
-                        } else if (secondCandidates[secondKey] !== null) {
-                            const previous = secondCandidates[secondKey];
-                            if (makeRemoteCategoryKey(previous.rootRussian, previous.secondRussian) !== categoryKey) {
-                                secondCandidates[secondKey] = null;
-                            }
-                        }
+            const seenRootIds = new Set();
+            for (const root of payload) {
+                const rootId = normalizeCategoryId(root && root.id);
+                if (!rootId || !Array.isArray(root.childs)) continue;
+                if (seenRootIds.has(rootId)) throw new Error(`重复的一级类目 ID：${rootId}`);
+                seenRootIds.add(rootId);
+                for (const child of root.childs) {
+                    const subjectId = normalizeCategoryId(child && child.id);
+                    if (!subjectId || normalizeCategoryId(child.parent) !== rootId) continue;
+                    const categoryKey = makeRemoteIdCategoryKey(rootId, subjectId);
+                    if (!categoryKey || Object.prototype.hasOwnProperty.call(categoryMap, categoryKey)) {
+                        throw new Error(`重复或无效的类目 ID：${rootId}/${subjectId}`);
                     }
-                    commissionMap[secondRussian] = values;
+                    categoryMap[categoryKey] = {
+                        rootId,
+                        subjectId,
+                        rootRussian: root.name,
+                        rootChinese: root.parentName,
+                        secondRussian: child.name,
+                        secondChinese: child.subjectName,
+                        commission: readCommissionValues(child),
+                    };
                 }
             }
-
-            const uniqueSecondMap = {};
-            for (const [key, record] of Object.entries(secondCandidates)) {
-                if (record) uniqueSecondMap[key] = record;
-            }
-
             return {
-                commissionMap: normalizeCommissionMap(commissionMap),
                 categoryMap: normalizeCategoryRecordMap(categoryMap),
-                secondMap: normalizeCategoryRecordMap(uniqueSecondMap),
             };
         }
 
         function normalizeRemoteCommissionData(data) {
             if (!data || typeof data !== 'object') throw new Error('远程佣金数据为空');
-            return {
-                commissionMap: normalizeCommissionMap(data.commissionMap),
-                categoryMap: normalizeCategoryRecordMap(data.categoryMap),
-                secondMap: normalizeCategoryRecordMap(data.secondMap),
-            };
+            const categoryMap = normalizeCategoryRecordMap(data.categoryMap);
+            const idCategoryMap = Object.create(null);
+            for (const record of Object.values(categoryMap)) {
+                const byRoot = idCategoryMap[record.rootId] || (idCategoryMap[record.rootId] = Object.create(null));
+                if (Object.prototype.hasOwnProperty.call(byRoot, record.subjectId)) {
+                    throw new Error(`重复的类目 ID：${record.rootId}/${record.subjectId}`);
+                }
+                byRoot[record.subjectId] = record;
+            }
+            return { categoryMap, idCategoryMap };
         }
 
-        function findRemoteCategoryData(rootName, secondName) {
-            const exactKey = makeRemoteCategoryKey(rootName, secondName);
-            if (exactKey && REMOTE_CATEGORY_MAP[exactKey]) return REMOTE_CATEGORY_MAP[exactKey];
-            const secondKey = normCategoryKey(secondName);
-            return secondKey ? (REMOTE_SECOND_CATEGORY_MAP[secondKey] || null) : null;
+        function findRemoteCategoryData(rootId, subjectId) {
+            const rootKey = normalizeCategoryId(rootId);
+            const subjectKey = normalizeCategoryId(subjectId);
+            if (!rootKey || !subjectKey) return null;
+            return REMOTE_CATEGORY_ID_MAP[rootKey]?.[subjectKey] || null;
+        }
+
+        function findProductCommission(rootId, subjectId) {
+            const record = findRemoteCategoryData(rootId, subjectId);
+            return record && record.commission.length ? record.commission : null;
         }
 
         function requestRemoteCommission() {
@@ -289,7 +254,7 @@
                         const bytes = Uint8Array.from(binary, char => char.charCodeAt(0));
                         payload = JSON.parse(new TextDecoder('utf-8').decode(bytes));
                     }
-                    if (!payload || !payload.categories) throw new Error('响应中没有 categories');
+                    if (!Array.isArray(payload)) throw new Error('响应不是一级类目数组');
                     return payload;
                 }
 
@@ -417,8 +382,17 @@
                 .replace(/'/g, '&apos;');
         }
 
+        function splitFeedbackTimestamp(value) {
+            const raw = String(value == null ? '' : value).trim();
+            if (!raw) return ['', ''];
+            const match = raw.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}(?::\d{2})?)(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?$/i);
+            if (match) return [match[1], match[2]];
+            return [raw, ''];
+        }
+
         function buildFeedbackWorksheet(rows, fallbackNmId) {
-            const headers = ['WB编号', '用户名', '星级', '评论内容', '尺码', '颜色', '评论时间', '更新时间', '状态ID'];
+            const headers = ['WB编号', '用户名', '星级', '评论内容', '尺码', '颜色', '评论日期', '评论时间', '更新日期', '更新时间', '状态ID'];
+            const columnWidths = [14, 18, 8, 50, 12, 12, 14, 12, 14, 12, 10];
             const columnName = index => {
                 let name = '';
                 for (let value = index + 1; value; value = Math.floor((value - 1) / 26)) {
@@ -428,17 +402,23 @@
             };
             const cellXml = (value, reference) =>
                 `<c r="${reference}" t="inlineStr"><is><t xml:space="preserve">${xmlEscape(value)}</t></is></c>`;
-            const sheetRows = [headers, ...rows.map(feedback => [
-                feedback?.nmid ?? feedback?.nmId ?? feedback?.nm_id ?? fallbackNmId,
-                feedback?.wbUserDetails?.name,
-                feedback?.productValuation,
-                feedback?.text,
-                feedback?.size,
-                feedback?.color,
-                feedback?.createdDate,
-                feedback?.updatedDate,
-                feedback?.statusId,
-            ])];
+            const sheetRows = [headers, ...rows.map(feedback => {
+                const [createdDate, createdTime] = splitFeedbackTimestamp(feedback?.createdDate);
+                const [updatedDate, updatedTime] = splitFeedbackTimestamp(feedback?.updatedDate);
+                return [
+                    feedback?.nmid ?? feedback?.nmId ?? feedback?.nm_id ?? fallbackNmId,
+                    feedback?.wbUserDetails?.name,
+                    feedback?.productValuation,
+                    feedback?.text,
+                    feedback?.size,
+                    feedback?.color,
+                    createdDate,
+                    createdTime,
+                    updatedDate,
+                    updatedTime,
+                    feedback?.statusId,
+                ];
+            })];
             const rowXml = sheetRows.map((cells, rowIndex) => {
                 const rowNumber = rowIndex + 1;
                 const cellsXml = cells.map((value, columnIndex) =>
@@ -446,10 +426,13 @@
                 ).join('');
                 return `<row r="${rowNumber}">${cellsXml}</row>`;
             }).join('');
+            const colsXml = columnWidths.map((width, index) =>
+                `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"/>`
+            ).join('');
             return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
                 `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">` +
                 `<sheetViews><sheetView workbookViewId="0"/></sheetViews>` +
-                `<sheetFormatPr defaultRowHeight="15"/><sheetData>${rowXml}</sheetData></worksheet>`;
+                `<sheetFormatPr defaultRowHeight="15"/><cols>${colsXml}</cols><sheetData>${rowXml}</sheetData></worksheet>`;
         }
 
         // XLSX is a ZIP package; store its XML entries without compression.
@@ -563,12 +546,9 @@
 
         function applyRemoteCommissionData(data, source) {
             const normalized = normalizeRemoteCommissionData(data);
-            COMMISSION_MAP = normalized.commissionMap;
-            REMOTE_CATEGORY_MAP = normalized.categoryMap;
-            REMOTE_SECOND_CATEGORY_MAP = normalized.secondMap;
-            __COMMISSION_NORM_CACHE.clear();
+            REMOTE_CATEGORY_ID_MAP = normalized.idCategoryMap;
             remoteCommissionStatus = { kind: 'loaded', message: '' };
-            console.info('[WB佣金] 已加载', source, Object.keys(REMOTE_CATEGORY_MAP).length, '条');
+            console.info('[WB佣金] 已加载', source, Object.keys(normalized.categoryMap).length, '条');
             if (typeof tryRender === 'function') tryRender();
         }
 
@@ -604,7 +584,7 @@
                     }
                 })
                 .catch(error => {
-                    const hasCachedData = Object.keys(COMMISSION_MAP).length > 0;
+                    const hasCachedData = Object.keys(REMOTE_CATEGORY_ID_MAP).length > 0;
                     remoteCommissionStatus = hasCachedData
                         ? { kind: 'warning', message: '远程更新失败，当前使用已缓存数据' }
                         : { kind: 'error', message: 'GitHub 连接失败：中文类目和佣金表未加载' };
@@ -739,12 +719,15 @@
         function mergeCategory(product, nmId) {
             if (!product) return product;
             const card = window.__WB_CARD__?.[nmId];
-            if (!card) return product;
+            const getField = names => getCardField(product, names) || getCardField(card, names);
             return { ...product, __card__: {
-                subj_root_name: getCardField(card, ['subj_root_name', 'subjRootName', 'subject_root_name', 'subjectRootName']),
-                subj_name: getCardField(card, ['subj_name', 'subjName', 'subject_name', 'subjectName']),
-                create_date: getCardField(card, ['create_date', 'createDate', 'created_at', 'createdAt']),
-                package_volume: getPackageVolume(card),
+                subject_root_id: getField(['subject_root_id', 'subjectRootId', 'subj_root_id', 'subjRootId']),
+                subject_id: getField(['subject_id', 'subjectId', 'subj_id', 'subjId']),
+                subj_root_name: getField(['subj_root_name', 'subjRootName', 'subject_root_name', 'subjectRootName']),
+                subj_name: getField(['subj_name', 'subjName', 'subject_name', 'subjectName']),
+                create_date: getCardField(card, ['create_date', 'createDate', 'created_at', 'createdAt'])
+                    || getCardField(product, ['create_date', 'createDate', 'created_at', 'createdAt']),
+                package_volume: card ? getPackageVolume(card) : getPackageVolume(product),
             }};
         }
         function storeCardData(url, data, requestNmId = '') {
@@ -1013,7 +996,9 @@
                 }
                 const subjName = getByPath(product, '__card__.subj_name');
                 const subjRootName = getByPath(product, '__card__.subj_root_name');
-                const categoryData = findRemoteCategoryData(subjRootName, subjName);
+                const subjRootId = getByPath(product, '__card__.subject_root_id');
+                const subjectId = getByPath(product, '__card__.subject_id');
+                const categoryData = findRemoteCategoryData(subjRootId, subjectId);
                 const measureGrid = document.createElement('div');
                 measureGrid.style.cssText = `
                     display:grid; grid-template-columns:repeat(2,minmax(0,1fr));
@@ -1252,8 +1237,7 @@
                 }
 
                 // ===== 佣金行 =====
-                const comm = (categoryData && categoryData.commission)
-                    || (subjName ? findCommission(subjName) : null);
+                const comm = findProductCommission(subjRootId, subjectId);
 
                 const commRow = document.createElement('div');
                 commRow.style.cssText = `
@@ -1285,7 +1269,11 @@
                     commValueRow.appendChild(mkTag('跨FBS', comm[2], '#3aa76d'));
                 } else {
                     const nf = document.createElement('span');
-                    nf.textContent = subjName ? `未匹配到：${subjName}` : '（无二级类目）';
+                    nf.textContent = categoryData
+                        ? `无对应佣金：${subjName || subjectId}`
+                        : subjRootId && subjectId
+                            ? `未匹配类目 ID：${subjRootId}/${subjectId}`
+                            : '缺少类目 ID';
                     nf.style.cssText = `color:#999; font-size:12px;`;
                     commValueRow.appendChild(nf);
                 }
@@ -1461,8 +1449,9 @@
                     e.stopPropagation();
 
                     const subjName = getByPath(product, '__card__.subj_name');
-                    const commission = (categoryData && categoryData.commission)
-                        || (subjName ? findCommission(subjName) : null);
+                    const subjRootId = getByPath(product, '__card__.subject_root_id');
+                    const subjectId = getByPath(product, '__card__.subject_id');
+                    const commission = findProductCommission(subjRootId, subjectId);
                     const fboCommission = (commission && commission[0] != null) ? commission[0] : '';
 
                     const weightRaw = getByPath(product, 'weight');
