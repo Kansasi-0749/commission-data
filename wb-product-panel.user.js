@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WB 商品数据窗口
 // @namespace    http://tampermonkey.net/
-// @version      14.0
+// @version      14.1
 // @updateURL    https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/wb-product-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/wb-product-panel.user.js
 // @description  拦截 Wildberries 商品接口，显示商品数据；一键跳转预算计算器并自动填充重量/尺寸/售价/类目
@@ -14,6 +14,8 @@
 // @grant        unsafeWindow
 // @connect      api.github.com
 // @connect      raw.githubusercontent.com
+// @connect      feedback-bt.wildberries.ru
+// @connect      wb.ru
 // ==/UserScript==
 
 (function () {
@@ -339,6 +341,224 @@
 
                 tryNextEndpoint();
             });
+        }
+
+        function requestFeedbackText(url) {
+            return new Promise((resolve, reject) => {
+                if (typeof GM_xmlhttpRequest !== 'function') {
+                    reject(new Error('GM_xmlhttpRequest 不可用'));
+                    return;
+                }
+                try {
+                    GM_xmlhttpRequest({
+                        method: 'GET',
+                        url,
+                        headers: { Accept: 'application/json' },
+                        timeout: 20000,
+                        onload: response => {
+                            if (response.status < 200 || response.status >= 300) {
+                                reject(new Error(`HTTP ${response.status}`));
+                                return;
+                            }
+                            resolve(String(response.responseText || ''));
+                        },
+                        onerror: () => reject(new Error('网络连接失败')),
+                        ontimeout: () => reject(new Error('请求超时')),
+                        onabort: () => reject(new Error('请求被取消')),
+                    });
+                } catch (error) {
+                    reject(error);
+                }
+            });
+        }
+
+        function resolveFeedbackHost(responseText) {
+            const raw = String(responseText || '').trim();
+            let payload;
+            try { payload = JSON.parse(raw); }
+            catch (error) {
+                const normalizedRaw = raw.replace(/\\/g, '');
+                try { payload = JSON.parse(normalizedRaw); }
+                catch (parseError) { payload = normalizedRaw; }
+            }
+            const candidates = Array.isArray(payload) ? payload : [payload];
+            for (const candidate of candidates) {
+                if (typeof candidate !== 'string') continue;
+                const normalized = candidate.replace(/\\/g, '').trim();
+                const match = normalized.match(/^https?:\/\/feedback-view-(\d+)\.wb\.ru\/?$/i);
+                if (match) return `https://feedback-view-${match[1]}.wb.ru`;
+            }
+            throw new Error('主机接口未返回有效的 feedback-view 地址');
+        }
+
+        function getFeedbackRows(payload) {
+            if (Array.isArray(payload)) return payload;
+            const queue = [payload];
+            const seen = new Set();
+            while (queue.length) {
+                const current = queue.shift();
+                if (!current || typeof current !== 'object' || seen.has(current)) continue;
+                seen.add(current);
+                if (Array.isArray(current.feedbacks)) return current.feedbacks;
+                if (Array.isArray(current.data)) return current.data;
+                if (current.data && typeof current.data === 'object') queue.push(current.data);
+                if (current.result && typeof current.result === 'object') queue.push(current.result);
+            }
+            throw new Error('评论接口响应中没有 feedbacks 列表');
+        }
+
+        function xmlEscape(value) {
+            return String(value == null ? '' : value)
+                .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g, '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&apos;');
+        }
+
+        function buildFeedbackWorksheet(rows, fallbackNmId) {
+            const headers = ['WB编号', '用户名', '星级', '评论内容', '尺码', '颜色', '评论时间', '更新时间', '状态ID'];
+            const columnName = index => {
+                let name = '';
+                for (let value = index + 1; value; value = Math.floor((value - 1) / 26)) {
+                    name = String.fromCharCode(65 + (value - 1) % 26) + name;
+                }
+                return name;
+            };
+            const cellXml = (value, reference) =>
+                `<c r="${reference}" t="inlineStr"><is><t xml:space="preserve">${xmlEscape(value)}</t></is></c>`;
+            const sheetRows = [headers, ...rows.map(feedback => [
+                feedback?.nmid ?? feedback?.nmId ?? feedback?.nm_id ?? fallbackNmId,
+                feedback?.wbUserDetails?.name,
+                feedback?.productValuation,
+                feedback?.text,
+                feedback?.size,
+                feedback?.color,
+                feedback?.createdDate,
+                feedback?.updatedDate,
+                feedback?.statusId,
+            ])];
+            const rowXml = sheetRows.map((cells, rowIndex) => {
+                const rowNumber = rowIndex + 1;
+                const cellsXml = cells.map((value, columnIndex) =>
+                    cellXml(value, `${columnName(columnIndex)}${rowNumber}`)
+                ).join('');
+                return `<row r="${rowNumber}">${cellsXml}</row>`;
+            }).join('');
+            return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+                `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">` +
+                `<sheetViews><sheetView workbookViewId="0"/></sheetViews>` +
+                `<sheetFormatPr defaultRowHeight="15"/><sheetData>${rowXml}</sheetData></worksheet>`;
+        }
+
+        // XLSX is a ZIP package; store its XML entries without compression.
+        function createXlsxBlob(files) {
+            const encoder = new TextEncoder();
+            const crcTable = new Uint32Array(256);
+            for (let index = 0; index < 256; index++) {
+                let value = index;
+                for (let bit = 0; bit < 8; bit++) {
+                    value = (value & 1) ? (0xEDB88320 ^ (value >>> 1)) : (value >>> 1);
+                }
+                crcTable[index] = value >>> 0;
+            }
+            const crc32 = bytes => {
+                let crc = 0xFFFFFFFF;
+                for (const byte of bytes) crc = crcTable[(crc ^ byte) & 0xFF] ^ (crc >>> 8);
+                return (crc ^ 0xFFFFFFFF) >>> 0;
+            };
+
+            const localParts = [];
+            const centralParts = [];
+            let localOffset = 0;
+            for (const [name, content] of Object.entries(files)) {
+                const nameBytes = encoder.encode(name);
+                const data = encoder.encode(content);
+                const checksum = crc32(data);
+                const localHeader = new Uint8Array(30 + nameBytes.length);
+                const localView = new DataView(localHeader.buffer);
+                localView.setUint32(0, 0x04034B50, true);
+                localView.setUint16(4, 20, true);
+                localView.setUint16(6, 0x0800, true);
+                localView.setUint32(14, checksum, true);
+                localView.setUint32(18, data.length, true);
+                localView.setUint32(22, data.length, true);
+                localView.setUint16(26, nameBytes.length, true);
+                localHeader.set(nameBytes, 30);
+                localParts.push(localHeader, data);
+
+                const centralHeader = new Uint8Array(46 + nameBytes.length);
+                const centralView = new DataView(centralHeader.buffer);
+                centralView.setUint32(0, 0x02014B50, true);
+                centralView.setUint16(4, 20, true);
+                centralView.setUint16(6, 20, true);
+                centralView.setUint16(8, 0x0800, true);
+                centralView.setUint32(16, checksum, true);
+                centralView.setUint32(20, data.length, true);
+                centralView.setUint32(24, data.length, true);
+                centralView.setUint16(28, nameBytes.length, true);
+                centralView.setUint32(42, localOffset, true);
+                centralHeader.set(nameBytes, 46);
+                centralParts.push(centralHeader);
+                localOffset += localHeader.length + data.length;
+            }
+
+            const centralSize = centralParts.reduce((size, part) => size + part.length, 0);
+            const endRecord = new Uint8Array(22);
+            const endView = new DataView(endRecord.buffer);
+            const fileCount = centralParts.length;
+            endView.setUint32(0, 0x06054B50, true);
+            endView.setUint16(8, fileCount, true);
+            endView.setUint16(10, fileCount, true);
+            endView.setUint32(12, centralSize, true);
+            endView.setUint32(16, localOffset, true);
+
+            return new Blob([...localParts, ...centralParts, endRecord], {
+                type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            });
+        }
+
+        async function downloadProductFeedback(imtId, nmId) {
+            const hostResponse = await requestFeedbackText(
+                `https://feedback-bt.wildberries.ru/feedback/api/v2/host?imt=${encodeURIComponent(imtId)}`
+            );
+            const feedbackHost = resolveFeedbackHost(hostResponse);
+            const feedbackText = await requestFeedbackText(
+                `${feedbackHost}/feedbacks/v2/${encodeURIComponent(imtId)}`
+            );
+            const feedbackRows = getFeedbackRows(JSON.parse(feedbackText));
+            const files = {
+                '[Content_Types].xml': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+                    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+                    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+                    '<Default Extension="xml" ContentType="application/xml"/>' +
+                    '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+                    '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' +
+                    '</Types>',
+                '_rels/.rels': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+                    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+                    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>' +
+                    '</Relationships>',
+                'xl/workbook.xml': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+                    '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" ' +
+                    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
+                    '<sheets><sheet name="评论" sheetId="1" r:id="rId1"/></sheets></workbook>',
+                'xl/_rels/workbook.xml.rels': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+                    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+                    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>' +
+                    '</Relationships>',
+                'xl/worksheets/sheet1.xml': buildFeedbackWorksheet(feedbackRows, nmId),
+            };
+            const blob = createXlsxBlob(files);
+            const objectUrl = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = objectUrl;
+            link.download = `WB商品评论_${nmId || imtId}.xlsx`;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
         }
 
         function applyRemoteCommissionData(data, source) {
@@ -935,6 +1155,53 @@
                 const makeCardCopyButtons = () => {
                     const group = document.createElement('div');
                     group.style.cssText = `display:flex; align-items:center; gap:4px;`;
+                    const feedbackButton = document.createElement('button');
+                    feedbackButton.type = 'button';
+                    feedbackButton.textContent = '评论';
+                    feedbackButton.title = '下载当前商品评论';
+                    feedbackButton.style.cssText = `
+                        flex:0 0 34px; width:34px; height:20px; box-sizing:border-box;
+                        padding:1px 2px; font-size:11px; line-height:16px;
+                        white-space:nowrap; background:#f3e6f1; color:#a30d89;
+                        border:1px solid #e7c9e3; border-radius:4px; cursor:pointer;
+                    `;
+                    const currentImtId = getCardField(
+                        window.__WB_CARD__?.[getCurrentNmId()],
+                        ['imt_id', 'imtId']
+                    );
+                    feedbackButton.disabled = !/^\d+$/.test(String(currentImtId || '').trim());
+                    if (feedbackButton.disabled) {
+                        feedbackButton.title = '卡片数据尚未加载或缺少 imt_id';
+                        feedbackButton.style.cssText += 'opacity:.55;cursor:not-allowed;';
+                    }
+                    feedbackButton.onclick = async e => {
+                        e.stopPropagation();
+                        if (feedbackButton.disabled) return;
+                        const imtId = String(getCardField(
+                            window.__WB_CARD__?.[getCurrentNmId()],
+                            ['imt_id', 'imtId']
+                        ) || '').trim();
+                        if (!/^\d+$/.test(imtId)) {
+                            alert('当前商品卡片数据缺少有效的 imt_id。');
+                            return;
+                        }
+                        feedbackButton.disabled = true;
+                        feedbackButton.textContent = '…';
+                        try {
+                            await downloadProductFeedback(imtId, getCurrentNmId());
+                            feedbackButton.textContent = '完成';
+                        } catch (error) {
+                            feedbackButton.textContent = '失败';
+                            alert(`评论下载失败：${error.message || error}`);
+                        } finally {
+                            window.setTimeout(() => {
+                                if (!feedbackButton.isConnected) return;
+                                feedbackButton.disabled = false;
+                                feedbackButton.textContent = '评论';
+                            }, 1400);
+                        }
+                    };
+                    group.appendChild(feedbackButton);
                     const addButton = (label, fieldName, title) => {
                         const button = document.createElement('button');
                         button.type = 'button';
