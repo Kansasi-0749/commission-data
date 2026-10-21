@@ -598,7 +598,7 @@
             { label: '尺寸体积', path: '__card__.package_volume', compact: true },
             { label: '重量', path: 'weight', transform: v => Number(v).toFixed(1) + ' kg', compact: true },
             { label: '库存', path: 'totalQuantity', compact: true },
-            { label: '上架时间', path: '__card__.create_date',
+            { label: '上架时间', path: '__card__.create_date', valueBold: true,
               transform: v => {
                   const d = new Date(v);
                   if (isNaN(d)) return String(v);
@@ -1006,7 +1006,7 @@
                 `;
                 bodyEl.appendChild(measureGrid);
 
-                const appendFieldRow = (label, value, compact = false, trailing = null) => {
+                const appendFieldRow = (label, value, compact = false, trailing = null, valueBold = false) => {
                     const val = value === undefined || value === null || value === '' ? '—' : String(value);
                     const row = document.createElement('div');
                     row.style.cssText = compact ? `
@@ -1024,7 +1024,7 @@
                         const labelEl = document.createElement('span');
                         labelEl.textContent = label;
                         labelEl.style.cssText = `
-                            grid-column:1; color:#777; white-space:nowrap;
+                            grid-column:1; color:#777; font-weight:400; white-space:nowrap;
                             font-size:11px; line-height:1.2;
                         `;
                         row.appendChild(labelEl);
@@ -1032,7 +1032,7 @@
                     const valEl = document.createElement('span');
                     valEl.textContent = val;
                     valEl.style.cssText = `
-                        grid-column:2; min-width:0; font-weight:600;
+                        grid-column:2; min-width:0; font-weight:${valueBold ? 700 : 600};
                         overflow-wrap:${trailing ? 'normal' : 'anywhere'};
                         white-space:${trailing ? 'nowrap' : 'normal'};
                         overflow:${trailing ? 'hidden' : 'visible'};
@@ -1233,7 +1233,7 @@
                     const cardCopyButtons = f.path === '__card__.create_date'
                         ? makeCardCopyButtons()
                         : null;
-                    appendFieldRow(f.label, formatValue(f, raw), f.compact === true, cardCopyButtons);
+                    appendFieldRow(f.label, formatValue(f, raw), f.compact === true, cardCopyButtons, f.valueBold === true);
                 }
 
                 // ===== 佣金行 =====
