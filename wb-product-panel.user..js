@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         WB 商品数据窗口测试
+// @name         WB 商品数据窗口
 // @namespace    http://tampermonkey.net/
-// @version      16.8
+// @version      16.0
 // @updateURL    https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/wb-product-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/wb-product-panel.user.js
 // @description  拦截 Wildberries 商品接口，显示商品数据；一键跳转预算计算器并自动填充重量/尺寸/售价/类目
