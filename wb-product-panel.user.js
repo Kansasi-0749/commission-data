@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WB 商品数据窗口
 // @namespace    http://tampermonkey.net/
-// @version      16.0
+// @version      16.1
 // @updateURL    https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/wb-product-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/wb-product-panel.user.js
 // @description  拦截 Wildberries 商品接口，显示商品数据；一键跳转预算计算器并自动填充重量/尺寸/售价/类目
@@ -14,6 +14,8 @@
 // @grant        unsafeWindow
 // @connect      api.github.com
 // @connect      raw.githubusercontent.com
+// @connect      gitee.com
+// @connect      raw.giteeusercontent.com
 // @connect      wbcontent.net
 // @connect      feedback-bt.wildberries.ru
 // @connect      questions.wildberries.ru
@@ -126,13 +128,29 @@
             return /^\/catalog(?:\/|$)/i.test(location.pathname) && !isDetailRoute();
         }
 
-        // 佣金表只从 GitHub 远程文件或油猴缓存读取。
-        const REMOTE_COMMISSION_URL = 'https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/WB%E7%B1%BB%E7%9B%AE%E4%BD%A3%E9%87%91%E8%A1%A8.json';
-        const REMOTE_COMMISSION_API_URL = 'https://api.github.com/repos/Kansasi-0749/commission-data/contents/WB%E7%B1%BB%E7%9B%AE%E4%BD%A3%E9%87%91%E8%A1%A8.json?ref=main';
+        // 佣金表优先从远程文件读取（Gitee 优先，GitHub 保底），油猴缓存作为兜底。
+        const REMOTE_COMMISSION_ENDPOINTS = [
+            {
+                label: 'Gitee Raw',
+                url: 'https://gitee.com/liu-zhuanglin/wbcommission/raw/master/WB%E7%B1%BB%E7%9B%AE%E4%BD%A3%E9%87%91%E8%A1%A8.json',
+            },
+            {
+                label: 'Gitee API',
+                url: 'https://gitee.com/api/v5/repos/liu-zhuanglin/wbcommission/contents/WB%E7%B1%BB%E7%9B%AE%E4%BD%A3%E9%87%91%E8%A1%A8.json',
+            },
+            {
+                label: 'GitHub Raw',
+                url: 'https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/WB%E7%B1%BB%E7%9B%AE%E4%BD%A3%E9%87%91%E8%A1%A8.json',
+            },
+            {
+                label: 'GitHub API',
+                url: 'https://api.github.com/repos/Kansasi-0749/commission-data/contents/WB%E7%B1%BB%E7%9B%AE%E4%BD%A3%E9%87%91%E8%A1%A8.json?ref=main',
+            },
+        ];
         const REMOTE_COMMISSION_CACHE_KEY = 'wb_commission_github_v4';
         const REMOTE_COMMISSION_CACHE_TTL = 6 * 60 * 60 * 1000;
         let remoteCommissionLoadStarted = false;
-        let remoteCommissionStatus = { kind: 'loading', message: '正在连接 GitHub 佣金表…' };
+        let remoteCommissionStatus = { kind: 'loading', message: '正在连接远程佣金表…' };
         let REMOTE_CATEGORY_ID_MAP = {};
 
         function normalizeCategoryId(value) {
@@ -242,13 +260,13 @@
             return record && record.commission.length ? record.commission : null;
         }
 
+        // 依次尝试 Gitee（Raw → API）、GitHub（Raw → API），任一成功即返回。
         function requestRemoteCommission() {
             return new Promise((resolve, reject) => {
                 if (typeof GM_xmlhttpRequest !== 'function') {
                     reject(new Error('GM_xmlhttpRequest 不可用'));
                     return;
                 }
-                const endpoints = [REMOTE_COMMISSION_URL, REMOTE_COMMISSION_API_URL];
                 const failures = [];
                 let endpointIndex = 0;
 
@@ -264,49 +282,44 @@
                     return payload;
                 }
 
+                function fail(label, reason) {
+                    failures.push(`${label} ${reason}`);
+                    console.warn(`[WB佣金] ${label} 失败：${reason}`);
+                    tryNextEndpoint();
+                }
+
                 function tryNextEndpoint() {
-                    if (endpointIndex >= endpoints.length) {
+                    if (endpointIndex >= REMOTE_COMMISSION_ENDPOINTS.length) {
                         reject(new Error(failures.join('；')));
                         return;
                     }
 
-                    const url = endpoints[endpointIndex++];
-                    const isApi = url === REMOTE_COMMISSION_API_URL;
+                    const endpoint = REMOTE_COMMISSION_ENDPOINTS[endpointIndex++];
+                    const label = endpoint.label;
                     try {
                         GM_xmlhttpRequest({
                             method: 'GET',
-                            url,
+                            url: endpoint.url,
                             headers: { Accept: 'application/json' },
                             timeout: 15000,
                             onload: response => {
                                 if (response.status < 200 || response.status >= 300) {
-                                    failures.push(`${isApi ? 'GitHub API' : 'GitHub Raw'} HTTP ${response.status}`);
-                                    tryNextEndpoint();
+                                    fail(label, `HTTP ${response.status}`);
                                     return;
                                 }
                                 try {
-                                    resolve(parsePayload(response.responseText));
+                                    resolve({ payload: parsePayload(response.responseText), label });
                                 } catch (error) {
-                                    failures.push(`${isApi ? 'GitHub API' : 'GitHub Raw'}: ${error.message}`);
-                                    tryNextEndpoint();
+                                    // 解析失败不代表网络不可用，继续尝试下一个源。
+                                    fail(label, error.message);
                                 }
                             },
-                            onerror: () => {
-                                failures.push(`${isApi ? 'GitHub API' : 'GitHub Raw'} 网络连接失败`);
-                                tryNextEndpoint();
-                            },
-                            ontimeout: () => {
-                                failures.push(`${isApi ? 'GitHub API' : 'GitHub Raw'} 请求超时`);
-                                tryNextEndpoint();
-                            },
-                            onabort: () => {
-                                failures.push(`${isApi ? 'GitHub API' : 'GitHub Raw'} 请求被取消`);
-                                tryNextEndpoint();
-                            },
+                            onerror: () => fail(label, '网络连接失败'),
+                            ontimeout: () => fail(label, '请求超时'),
+                            onabort: () => fail(label, '请求被取消'),
                         });
                     } catch (error) {
-                        failures.push(`${isApi ? 'GitHub API' : 'GitHub Raw'}: ${error.message}`);
-                        tryNextEndpoint();
+                        fail(label, error.message);
                     }
                 }
 
@@ -710,9 +723,9 @@
             if (savedAt && Date.now() - savedAt < REMOTE_COMMISSION_CACHE_TTL) return;
 
             requestRemoteCommission()
-                .then(payload => {
+                .then(({ payload, label }) => {
                     const data = extractRemoteCommissionData(payload);
-                    applyRemoteCommissionData(data, 'GitHub');
+                    applyRemoteCommissionData(data, label);
                     try {
                         GM_setValue(REMOTE_COMMISSION_CACHE_KEY, {
                             savedAt: Date.now(),
@@ -726,7 +739,7 @@
                     const hasCachedData = Object.keys(REMOTE_CATEGORY_ID_MAP).length > 0;
                     remoteCommissionStatus = hasCachedData
                         ? { kind: 'warning', message: '远程更新失败，当前使用已缓存数据' }
-                        : { kind: 'error', message: 'GitHub 连接失败：中文类目和佣金表未加载' };
+                        : { kind: 'error', message: '远程佣金表连接失败：中文类目和佣金表未加载' };
                     console.error('[WB佣金] 远程表加载失败', error);
                     if (typeof tryRender === 'function') tryRender();
                     if (pageMode === 'list') queueListRender();
