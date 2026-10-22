@@ -391,8 +391,8 @@
         }
 
         function buildFeedbackWorksheet(rows, fallbackNmId) {
-            const headers = ['WB编号', '用户名', '星级', '评论内容', '尺码', '颜色', '评论日期', '评论时间', '更新日期', '更新时间', '状态ID'];
-            const columnWidths = [14, 18, 8, 50, 12, 12, 14, 12, 14, 12, 10];
+            const headers = ['WB编号', '用户名', '星级', '评论内容', '卖家回复', '屏蔽', '尺码', '颜色', '评论日期', '评论时间', '更新日期', '更新时间', '状态ID'];
+            const columnWidths = [14, 18, 8, 50, 50, 12, 12, 12, 14, 12, 14, 12, 10];
             const columnName = index => {
                 let name = '';
                 for (let value = index + 1; value; value = Math.floor((value - 1) / 26)) {
@@ -410,6 +410,8 @@
                     feedback?.wbUserDetails?.name,
                     feedback?.productValuation,
                     feedback?.text,
+                    feedback?.answer?.text,
+                    feedback?.excludedFromRating?.isExcluded === true ? '屏蔽' : '',
                     feedback?.size,
                     feedback?.color,
                     createdDate,
