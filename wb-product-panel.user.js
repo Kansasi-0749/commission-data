@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         WB 商品数据窗口
 // @namespace    http://tampermonkey.net/
-// @version      16.1
+// @version      17.0
 // @updateURL    https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/wb-product-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/wb-product-panel.user.js
-// @description  拦截 Wildberries 商品接口，显示商品数据；一键跳转预算计算器并自动填充重量/尺寸/售价/类目
+// @description  拦截 Wildberries 商品接口，显示商品数据；一键跳转预算计算器并自动填充重量/尺寸/售价/类目；详情页/列表页/首页/店铺页/图片搜索页可分别开关
 // @match        https://www.wildberries.ru/*
 // @match        https://yadmin.sanlindou.com/goods-shop/budget-calculator*
 // @run-at       document-start
@@ -120,12 +120,48 @@
         const TARGET_DETAIL = '/__internal/u-card/cards/v4/detail';
         const TARGET_CARD   = '/info/ru/card.json';
         const SEARCH_PRODUCTS_URL = /\/__internal\/u-search\/[^?#]*\/search(?:[?#]|$)/i;
-        const PAGE_WINDOW = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
-        function isDetailRoute() {
-            return /^\/catalog\/\d+\/detail(?:\.aspx)?\/?$/i.test(location.pathname);
+        // 商品集合接口不止搜索一种：首页推荐（u-recom）、店铺页、品牌页、图片搜索、类目页各走各的路径。
+        // 命中任一即交给 indexListProducts 处理（它自己会做 products 数组的深度查找）。
+        const LIST_PRODUCTS_URL = new RegExp(
+            '\\/__internal\\/(?:u-[a-z0-9-]+\\/)?[^?#]*\\b(?:search|catalog|recom\\w*|sellers?|brands?)\\b' +
+            '|(?:^|\\/)(?:sellers?|brands?|catalog)\\/v\\d+\\/catalog(?:[?#]|$)' +
+            '|\\/\\/(?:catalog|u-catalog|search|u-search|u-recom|recom)\\.wb\\.ru\\/',
+            'i',
+        );
+        function isListProductsUrl(url) {
+            const text = String(url || '');
+            if (!text || text.includes(TARGET_DETAIL) || text.includes(TARGET_CARD)) return false;
+            return SEARCH_PRODUCTS_URL.test(text) || LIST_PRODUCTS_URL.test(text);
         }
-        function isProductListRoute() {
-            return /^\/catalog(?:\/|$)/i.test(location.pathname) && !isDetailRoute();
+        const PAGE_WINDOW = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
+        // 详情页固定为 /catalog/{nmId}/detail[.aspx]。
+        const DETAIL_ROUTE = /^\/catalog\/\d+\/detail(?:\.aspx)?\/?$/i;
+        // 各类商品卡片网格页（命中即按列表页渲染，但归属不同页面类型，可分别开关）。
+        const LIST_ROUTE_PATTERNS = [
+            /^\/catalog(?:\/|$)/i,
+            /^\/search(?:\/|$)/i,
+            /^\/seller\/\d+(?:\/|$)/i,
+            /^\/sellers?(?:\/|$)/i,
+            /^\/brands?(?:\/|$)/i,
+            /^\/brand\/\d+(?:\/|$)/i,
+            /^\/stores?(?:\/|$)/i,
+            /^\/promotions?(?:\/|$)/i,
+            /^\/tags?(?:\/|$)/i,
+        ];
+        function isDetailRoute() {
+            return DETAIL_ROUTE.test(location.pathname);
+        }
+        function isHomeRoute() {
+            return location.pathname === '/' || location.pathname === '';
+        }
+        function isImageSearchRoute() {
+            return /^\/search\/image(?:\/|$)/i.test(location.pathname);
+        }
+        function isSellerRoute() {
+            return /^\/sellers?(?:\/|$)/i.test(location.pathname);
+        }
+        function isKnownListRoute() {
+            return LIST_ROUTE_PATTERNS.some(pattern => pattern.test(location.pathname));
         }
 
         // 佣金表优先从远程文件读取（Gitee 优先，GitHub 保底），油猴缓存作为兜底。
@@ -929,8 +965,9 @@
             // 列表页每个商品都要拿 card.json（上架时间 + 变体数），所以这里不再按 create_date 提前放行。
             if (pageMode !== 'list') return;
             const pending = [...new Set(nmIds)].filter(nmId => {
-                const product = listProductsByNm.get(nmId);
-                return /^\d+$/.test(nmId) && product &&
+                // 不再要求 listProductsByNm 里已有数据：图片搜索/店铺等页面的接口可能还没被识别，
+                // 只要卡片渲染出来了，就先用 basket 的 card.json 兜底填充。
+                return /^\d+$/.test(nmId) &&
                     !listCardDataByNm.has(nmId) && !listCardLoadStarted.has(nmId) &&
                     canRetryListCard(nmId);
             });
@@ -961,9 +998,41 @@
             });
         }
 
+        // 接口版本很多（u-search / v4 / v5 / seller catalog …），products 数组的层级不固定，
+        // 这里做有限深度的广度优先查找，避免每换一个接口就漏抓一次。
+        function findProductsArray(payload) {
+            if (!payload || typeof payload !== 'object') return [];
+            const queue = [{ value: payload, depth: 0 }];
+            const seen = new Set();
+            while (queue.length) {
+                const { value, depth } = queue.shift();
+                if (!value || typeof value !== 'object' || seen.has(value)) continue;
+                seen.add(value);
+                if (Array.isArray(value.products)) return value.products;
+                if (Array.isArray(value.data) && depth < 3 && value.data.length &&
+                    value.data[0] && typeof value.data[0] === 'object' &&
+                    ('id' in value.data[0] || 'nmId' in value.data[0] || 'nm_id' in value.data[0])) {
+                    return value.data;
+                }
+                if (Array.isArray(value) && depth < 3) {
+                    // 形如 { data: [ {...product} ] } 的返回
+                    if (value.length && value[0] && typeof value[0] === 'object' &&
+                        ('id' in value[0] || 'nmId' in value[0] || 'nm_id' in value[0])) return value;
+                    for (const item of value.slice(0, 5)) queue.push({ value: item, depth: depth + 1 });
+                    continue;
+                }
+                if (depth >= 3) continue;
+                for (const key of ['data', 'result', 'payload', 'catalog', 'body']) {
+                    if (value[key] && typeof value[key] === 'object') {
+                        queue.push({ value: value[key], depth: depth + 1 });
+                    }
+                }
+            }
+            return [];
+        }
+
         function indexListProducts(data, sourceUrl = '') {
-            const products = [data?.products, data?.data?.products, data?.data?.data?.products]
-                .find(Array.isArray) || [];
+            const products = findProductsArray(data);
             for (const product of products) {
                 if (!product || typeof product !== 'object') continue;
                 const rawId = product.id ?? product.nmId ?? product.nm_id;
@@ -1219,6 +1288,109 @@
             toastTimer = window.setTimeout(hideToast, 2400);
         }
 
+        // ===== 页面类型总开关浮标 =====
+        // 五类页面可以各自开关；浮标常驻右下角，关掉某一类后也能随时改回去。
+        let kindToggleEl = null;
+        let kindToggleOpen = false;
+
+        function ensureKindToggle() {
+            if (kindToggleEl) return kindToggleEl;
+            const root = document.createElement('div');
+            root.id = 'wb-kind-toggle';
+            root.style.cssText = `
+                position:fixed; right:12px; bottom:12px; z-index:2147483000;
+                font-family:-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
+            `;
+
+            const menu = document.createElement('div');
+            menu.style.cssText = `
+                display:none; margin-bottom:6px; padding:8px 10px; min-width:184px;
+                background:#fff; color:#222; border-radius:8px;
+                box-shadow:0 4px 16px rgba(0,0,0,.16); border:1px solid #f0e0ee;
+                font-size:12px; line-height:1.5;
+            `;
+
+            const title = document.createElement('div');
+            title.textContent = '面板显示范围';
+            title.style.cssText = `font-weight:600; color:#cb11ab; margin-bottom:4px;`;
+            menu.appendChild(title);
+
+            for (const [kind, meta] of Object.entries(PAGE_KINDS)) {
+                const row = document.createElement('label');
+                row.style.cssText = `display:flex; align-items:flex-start; gap:6px; padding:3px 0; cursor:pointer;`;
+                const box = document.createElement('input');
+                box.type = 'checkbox';
+                box.checked = isPageKindEnabled(kind);
+                box.dataset.wbKind = kind;
+                box.style.cssText = `margin:2px 0 0; accent-color:#cb11ab; cursor:pointer;`;
+                box.addEventListener('change', () => {
+                    setPageKindEnabled(kind, box.checked);
+                    applyPageKindChange();
+                });
+                const text = document.createElement('span');
+                text.style.cssText = `min-width:0;`;
+                const nameEl = document.createElement('span');
+                nameEl.textContent = meta.label;
+                nameEl.style.cssText = `font-weight:600;`;
+                const descEl = document.createElement('span');
+                descEl.textContent = ` ${meta.desc}`;
+                descEl.style.cssText = `color:#999; font-size:11px;`;
+                text.append(nameEl, descEl);
+                row.append(box, text);
+                menu.appendChild(row);
+            }
+
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.textContent = '面板';
+            button.title = '选择在哪些页面显示商品面板';
+            button.style.cssText = `
+                display:flex; align-items:center; justify-content:center; gap:4px;
+                height:28px; padding:0 10px; margin-left:auto;
+                background:#cb11ab; color:#fff; border:none; border-radius:14px;
+                font-size:12px; font-weight:600; cursor:pointer;
+                box-shadow:0 2px 8px rgba(203,17,171,.32); opacity:.92;
+            `;
+            button.addEventListener('click', event => {
+                event.stopPropagation();
+                kindToggleOpen = !kindToggleOpen;
+                menu.style.display = kindToggleOpen ? 'block' : 'none';
+            });
+
+            root.append(menu, button);
+            document.body.appendChild(root);
+            kindToggleEl = root;
+            return root;
+        }
+
+        function applyPageKindChange() {
+            stopUnknownRouteProbe();
+            if (pageMode === 'detail') leaveDetailMode();
+            else if (pageMode === 'list') leaveListMode();
+            pageMode = null;
+            updatePageKindHint();
+            switchPageMode();
+        }
+
+        // 当前页面类型被关闭时，给一条一次性提示，避免“以为脚本坏了”。
+        let pageKindHintPath = '';
+
+        function updatePageKindHint() {
+            // SPA 会整块替换 body，浮标可能被一起删掉，这里顺手挂回去。
+            if (kindToggleEl && !kindToggleEl.isConnected && document.body) {
+                document.body.appendChild(kindToggleEl);
+            }
+            const kind = resolvePageKind();
+            if (!kind || isPageKindEnabled(kind)) {
+                pageKindHintPath = '';
+                return;
+            }
+            const marker = `${kind}:${location.pathname}`;
+            if (pageKindHintPath === marker) return;
+            pageKindHintPath = marker;
+            showToast(`${PAGE_KINDS[kind].label}面板已关闭，可在右下角「面板」里重新打开`);
+        }
+
         let panelEl = null, bodyEl = null;
         let panelPlacementNm = null;
         let pageMode = null;
@@ -1242,6 +1414,11 @@
             });
         }
 
+        function getNmFromCatalogHref(href) {
+            const match = String(href || '').match(/\/catalog\/(\d+)\/detail(?:\.aspx)?(?:[/?#]|$)/i);
+            return match ? match[1] : '';
+        }
+
         function getListCardNmId(card) {
             for (const key of ['data-nm-id', 'data-popup-nm-id', 'data-nm', 'data-nmid']) {
                 const value = card.getAttribute(key);
@@ -1250,8 +1427,20 @@
             const link = card.matches('a[href*="/catalog/"]')
                 ? card
                 : card.querySelector('a[href*="/catalog/"]');
-            const match = String(link?.getAttribute('href') || '').match(/\/catalog\/(\d+)\/detail(?:\.aspx)?(?:[/?#]|$)/i);
-            return match ? match[1] : '';
+            return getNmFromCatalogHref(link?.getAttribute('href'));
+        }
+
+        // 未知卡片结构时的兜底：从商品详情链接往上找一块尺寸合理的祖先当容器。
+        // 只在精确选择器一个都没命中时才跑，避免给正常页面增加布局开销。
+        function findGenericCardHost(link) {
+            let node = link;
+            for (let depth = 0; depth < 6; depth++) {
+                node = node.parentElement;
+                if (!node || node === document.body || node === document.documentElement) return null;
+                const rect = node.getBoundingClientRect();
+                if (rect.height >= 120 && rect.width >= 60) return node;
+            }
+            return null;
         }
 
         function getListProductCards() {
@@ -1276,6 +1465,20 @@
                 .forEach(addCard);
             document.querySelectorAll('a[href*="/catalog/"][href*="/detail"]')
                 .forEach(link => addCard(link.closest('article.product-card, .product-card, [data-nm-id], [data-popup-nm-id], [data-nm], [data-nmid], article')));
+
+            if (!cards.length) {
+                // 完全认不出的版式（图片搜索/店铺新模板等）：用详情链接 + 几何尺寸兜底。
+                document.querySelectorAll('a[href*="/catalog/"][href*="/detail"]')
+                    .forEach(link => {
+                        if (cards.length >= 200) return;
+                        const nmId = getNmFromCatalogHref(link.getAttribute('href'));
+                        if (!nmId) return;
+                        const host = findGenericCardHost(link);
+                        if (!host || seenCards.has(host)) return;
+                        seenCards.add(host);
+                        cards.push([nmId, host]);
+                    });
+            }
             return cards;
         }
 
@@ -1359,19 +1562,25 @@
         }
 
         function updateListPanel(panel, nmId, product) {
-            const supplierId = product ? getSupplierId(product) : '';
-            const supplierRaw = product && (product.supplierName ?? product.supplier_name ?? product.supplier);
+            // card.json 是列表页唯一稳定的数据源：店铺页/图片搜索的接口结构各不相同，
+            // 拿不到 product 时至少还能从 card.json 里读出上架时间、类目、体积、变体数。
+            const cardData = listCardDataByNm.get(nmId) || null;
+            const supplierId = product
+                ? getSupplierId(product)
+                : String(getCardField(cardData, ['supplier_id', 'supplierId']) || '').trim();
+            const supplierRaw = product
+                ? (product.supplierName ?? product.supplier_name ?? product.supplier)
+                : getCardField(cardData, ['supplier_name', 'supplierName', 'seller_name']);
             const supplierName = supplierRaw == null ? '' : String(supplierRaw).trim();
             // 变体数和上架时间一样，都以 card.json 为准（搜索接口的 colors 是颜色名，不能用来数变体）。
-            const cardData = listCardDataByNm.get(nmId) || null;
             const cardLoading = listCardLoadStarted.has(nmId);
             const variantsCount = getCardVariantsCount(cardData);
             const variantsText = variantsCount == null
                 ? (cardLoading ? '读取中…' : '—')
                 : variantsCount;
-            const categoryData = product
-                ? findRemoteCategoryData(product.subjectParentId, product.subjectId)
-                : null;
+            const rootId = product?.subjectParentId ?? getCardField(cardData, ['subject_root_id', 'subjectRootId']);
+            const subjectId = product?.subjectId ?? getCardField(cardData, ['subject_id', 'subjectId']);
+            const categoryData = findRemoteCategoryData(rootId, subjectId);
             const rootCategory = categoryData?.rootChinese || '';
             const secondCategory = categoryData?.secondChinese || '';
             const createdDateRaw = getCardField(product, ['create_date', 'createDate', 'created_at', 'createdAt'])
@@ -1381,17 +1590,23 @@
                 : (cardLoading ? '读取中…' : '—');
             const volumeRaw = product?.volume;
             const volume = volumeRaw == null || volumeRaw === '' || !Number.isFinite(Number(volumeRaw))
-                ? '—'
+                ? (getPackageVolume(cardData) || '—')
                 : `${(Number(volumeRaw) / 10).toFixed(1)} 升`;
             const weightRaw = product?.weight;
             const weight = weightRaw == null || weightRaw === '' || !Number.isFinite(Number(weightRaw))
                 ? '—'
                 : `${Number(weightRaw).toFixed(1)} kg`;
+            const brandText = product?.brand ?? getCardField(cardData, ['brand', 'selling_brand_name']);
+            const stockText = product?.totalQuantity ?? getCardField(cardData, ['totalQuantity', 'total_quantity']);
             const signature = JSON.stringify(product ? [
-                nmId, product.brand, supplierName, supplierId,
-                rootCategory, secondCategory, product.totalQuantity,
+                nmId, brandText, supplierName, supplierId,
+                rootCategory, secondCategory, stockText,
                 volumeRaw, weightRaw, variantsCount, variantsText, createdDateRaw, createdAt,
-            ] : [nmId, 'loading']);
+            ] : [
+                nmId, 'card-only', brandText, supplierName, supplierId,
+                rootCategory, secondCategory, stockText, volume, weight,
+                variantsCount, variantsText, createdDateRaw, createdAt,
+            ]);
             if (panel.dataset.wbSignature === signature) return;
             panel.dataset.wbSignature = signature;
             const skuEl = panel.querySelector('.wb-list-panel-sku');
@@ -1400,9 +1615,9 @@
             if (!bodyEl) return;
             bodyEl.replaceChildren();
 
-            if (!product) {
+            if (!product && !cardData) {
                 const loadingEl = document.createElement('div');
-                loadingEl.textContent = '正在读取商品数据…';
+                loadingEl.textContent = cardLoading ? '正在读取商品数据…' : '未捕获到商品数据';
                 loadingEl.style.cssText = 'grid-column:1/-1;padding:4px 2px;color:#777;font-size:11px;';
                 bodyEl.appendChild(loadingEl);
                 return;
@@ -1413,11 +1628,11 @@
             const createdAtField = makeListField('上架时间', createdAt);
             createdAtField.style.gridColumn = '1 / -1';
             bodyEl.append(
-                makeListField('品牌', product.brand),
+                makeListField('品牌', brandText),
                 makeListField('店铺', sellerText, sellerUrl),
                 makeListField('一级类目', rootCategory),
                 makeListField('二级类目', secondCategory),
-                makeListField('库存', product.totalQuantity),
+                makeListField('库存', stockText),
                 makeListField('变体', variantsText),
                 makeListField('体积', volume),
                 makeListField('重量', weight),
@@ -1705,8 +1920,75 @@
             scheduleProductDataRecovery(getCurrentNmId());
         }
 
+        // ===== 页面类型（可分别开关）=====
+        const PAGE_KINDS = {
+            detail: { label: '详情页', desc: '/catalog/{nmId}/detail' },
+            list: { label: '列表页', desc: '类目 / 搜索 / 品牌 / 促销网格' },
+            home: { label: '首页', desc: 'wildberries.ru 首页推荐流' },
+            seller: { label: '店铺页', desc: '/seller/{id}' },
+            imageSearch: { label: '图片搜索页', desc: '/search/image' },
+        };
+        const PAGE_KIND_SETTING_KEY = 'wb_panel_page_kinds_v1';
+        let pageKindEnabled = null;
+
+        function readStoredPageKindEnabled() {
+            let raw = null;
+            try { raw = GM_getValue(PAGE_KIND_SETTING_KEY, null); } catch (e) {}
+            if (!raw) {
+                try { raw = JSON.parse(localStorage.getItem(PAGE_KIND_SETTING_KEY) || 'null'); } catch (e) {}
+            }
+            return raw && typeof raw === 'object' ? raw : null;
+        }
+
+        function getPageKindEnabled() {
+            if (pageKindEnabled) return pageKindEnabled;
+            const stored = readStoredPageKindEnabled() || {};
+            pageKindEnabled = {};
+            for (const kind of Object.keys(PAGE_KINDS)) {
+                pageKindEnabled[kind] = stored[kind] !== false;
+            }
+            return pageKindEnabled;
+        }
+
+        function isPageKindEnabled(kind) {
+            return Boolean(kind) && PAGE_KINDS[kind] && getPageKindEnabled()[kind] !== false;
+        }
+
+        function setPageKindEnabled(kind, enabled) {
+            if (!PAGE_KINDS[kind]) return;
+            pageKindEnabled = { ...getPageKindEnabled(), [kind]: Boolean(enabled) };
+            try { GM_setValue(PAGE_KIND_SETTING_KEY, pageKindEnabled); } catch (e) {}
+            try { localStorage.setItem(PAGE_KIND_SETTING_KEY, JSON.stringify(pageKindEnabled)); } catch (e) {}
+        }
+
+        // 路由无法识别时的兜底：直接用 DOM 证据判定是不是卡片网格页。
+        // WB 上新模板很快（图片搜索 / 店铺新橱窗等），路径表追不上时就靠这个。
+        function countDetailLinks() {
+            return document.querySelectorAll('a[href*="/catalog/"][href*="/detail"]').length;
+        }
+        function hasProductCardEvidence() {
+            return countDetailLinks() >= 4;
+        }
+
+        function resolvePageKind() {
+            if (isDetailRoute()) return 'detail';
+            if (isHomeRoute()) return 'home';
+            if (isImageSearchRoute()) return 'imageSearch';
+            if (isSellerRoute()) return 'seller';
+            if (isKnownListRoute()) return 'list';
+            // 非商品集合区（购物篮、订单…）也可能零星出现详情链接，要求有规模才判定为列表页。
+            return hasProductCardEvidence() ? 'list' : null;
+        }
+
+        // 页面类型 → 工作模式。类型被关掉时返回 null，即不渲染任何面板。
+        function resolvePageMode() {
+            const kind = resolvePageKind();
+            if (!kind || !isPageKindEnabled(kind)) return null;
+            return kind === 'detail' ? 'detail' : 'list';
+        }
+
         function switchPageMode() {
-            const nextMode = isDetailRoute() ? 'detail' : isProductListRoute() ? 'list' : null;
+            const nextMode = resolvePageMode();
             if (nextMode === pageMode) {
                 if (nextMode === 'detail') {
                     lastRenderedNm = null;
@@ -1716,6 +1998,10 @@
                 } else if (nextMode === 'list') {
                     queueListRender();
                 }
+                if (nextMode) stopUnknownRouteProbe();
+                else if (!resolvePageKind()) startUnknownRouteProbe();
+                else stopUnknownRouteProbe();
+                updatePageKindHint();
                 return;
             }
             if (pageMode === 'detail') leaveDetailMode();
@@ -1723,12 +2009,50 @@
             pageMode = nextMode;
             if (pageMode === 'detail') enterDetailMode();
             else if (pageMode === 'list') enterListMode();
+            if (pageMode) stopUnknownRouteProbe();
+            else if (!resolvePageKind()) startUnknownRouteProbe();
+            else stopUnknownRouteProbe();
+            updatePageKindHint();
+        }
+
+        // 首帧拿不到卡片（SPA 还没渲染完）时不能直接放弃，观察 DOM 直到出现卡片或离开该 URL。
+        let unknownRouteProbe = null;
+
+        function stopUnknownRouteProbe() {
+            if (!unknownRouteProbe) return;
+            unknownRouteProbe.disconnect();
+            unknownRouteProbe = null;
+        }
+
+        function startUnknownRouteProbe() {
+            if (unknownRouteProbe || !document.body) return;
+            const probedPath = location.pathname;
+            let queued = false;
+            const evaluate = () => {
+                queued = false;
+                if (location.pathname !== probedPath) { // 用户已经切走了
+                    stopUnknownRouteProbe();
+                    return;
+                }
+                if (pageMode) { stopUnknownRouteProbe(); return; }
+                if (!hasProductCardEvidence()) return;
+                stopUnknownRouteProbe();
+                switchPageMode();
+            };
+            unknownRouteProbe = new MutationObserver(() => {
+                if (queued) return;
+                queued = true;
+                requestAnimationFrame(evaluate);
+            });
+            unknownRouteProbe.observe(document.body, { childList: true, subtree: true });
+            console.info('[WB路由] 当前页面无法按路径识别，已启用 DOM 探测', location.pathname);
         }
 
         function handleRouteChange() {
             const href = location.href;
             if (href === lastRouteHref) return;
             lastRouteHref = href;
+            stopUnknownRouteProbe();
             switchPageMode();
         }
 
@@ -2553,10 +2877,10 @@
                                 onDataArrived();
                             }).catch(e => console.warn('[WB抓取] card.json 解析失败', e));
                         }
-                        if (SEARCH_PRODUCTS_URL.test(url)) {
+                        if (isListProductsUrl(url)) {
                             const clone = resp.clone();
                             clone.json().then(data => indexListProducts(data, url))
-                                .catch(e => console.warn('[WB列表] 搜索响应解析失败', e));
+                                .catch(e => console.warn('[WB列表] 列表响应解析失败', e));
                         }
                     } catch (e) {}
                     return resp;
@@ -2580,7 +2904,7 @@
                         const url = String(this.__wb_url || '');
                         const requestNmId = String(this.__wb_nm || '');
                         let data = null;
-                        if (url.includes(TARGET_DETAIL) || url.includes(TARGET_CARD) || SEARCH_PRODUCTS_URL.test(url)) {
+                        if (url.includes(TARGET_DETAIL) || url.includes(TARGET_CARD) || isListProductsUrl(url)) {
                             if (this.responseType === '' || this.responseType === 'text') data = JSON.parse(this.responseText);
                             else if (this.responseType === 'json') data = this.response;
                             else return;
@@ -2593,7 +2917,7 @@
                             storeCardData(url, data, requestNmId);
                             onDataArrived();
                         }
-                        if (SEARCH_PRODUCTS_URL.test(url) && data) indexListProducts(data, url);
+                        if (isListProductsUrl(url) && data) indexListProducts(data, url);
                     } catch (e) {
                         console.warn('[WB抓取] XHR 解析失败', e);
                     }
@@ -2618,6 +2942,7 @@
                 return;
             }
             bootstrapped = true;
+            try { ensureKindToggle(); } catch (error) { console.warn('[WB设置] 面板开关初始化失败', error); }
             switchPageMode();
         }
         window.addEventListener('DOMContentLoaded', bootstrap, { once: true });
