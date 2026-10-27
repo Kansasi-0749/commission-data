@@ -1,12 +1,12 @@
 // ==UserScript==
 // @name         WB 商品数据窗口
 // @namespace    http://tampermonkey.net/
-// @version      17.0
+// @version      17.2.3
 // @updateURL    https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/wb-product-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/wb-product-panel.user.js
 // @description  拦截 Wildberries 商品接口，显示商品数据；一键跳转预算计算器并自动填充重量/尺寸/售价/类目；详情页/列表页/首页/店铺页/图片搜索页可分别开关
 // @match        https://www.wildberries.ru/*
-// @match        https://yadmin.sanlindou.com/goods-shop/budget-calculator*
+// @match        https://yadmin.sldeclat.com/site/index*
 // @run-at       document-start
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -25,7 +25,9 @@
 (function () {
     'use strict';
 
-    const BUDGET_URL = 'https://yadmin.sanlindou.com/goods-shop/budget-calculator';
+    // 后台系统域名：yadmin.sldeclat.com（原 yadmin.sanlindou.com 已下线）。
+    const BUDGET_HOST = 'yadmin.sldeclat.com';
+    const BUDGET_URL = `https://${BUDGET_HOST}/site/index`;
     const DEFAULT_DISCOUNT_PERCENT = 35;
     const LS_DISCOUNT_PERCENT = 'wb_budget_discount_percent';
 
@@ -110,7 +112,7 @@
     }
 
     if (location.hostname === 'www.wildberries.ru') initWildberries();
-    else if (location.hostname === 'yadmin.sanlindou.com') initBudgetCalculator();
+    else if (location.hostname === BUDGET_HOST) initBudgetCalculator();
 
     // ============================================================
     // WB 端
