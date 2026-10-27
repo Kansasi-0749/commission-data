@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WB 商品数据窗口
 // @namespace    http://tampermonkey.net/
-// @version      17.2.5
+// @version      17.2.6
 // @updateURL    https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/wb-product-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/wb-product-panel.user.js
 // @description  拦截 Wildberries 商品接口，显示商品数据；一键跳转预算计算器并自动填充重量/尺寸/售价/类目；详情页/列表页/首页/店铺页/图片搜索页可分别开关
@@ -134,6 +134,11 @@
             const text = String(url || '');
             if (!text || text.includes(TARGET_DETAIL) || text.includes(TARGET_CARD)) return false;
             return SEARCH_PRODUCTS_URL.test(text) || LIST_PRODUCTS_URL.test(text);
+        }
+        function isDetailRecommendUrl(url) {
+            const text = String(url || '');
+            return /\/u-recom(?:\/|[?#])/i.test(text)
+                || /\/\/(?:u-recom|recom)\.wb\.ru\//i.test(text);
         }
         const PAGE_WINDOW = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
         // 详情页固定为 /catalog/{nmId}/detail[.aspx]。
@@ -739,7 +744,7 @@
             remoteCommissionStatus = { kind: 'loaded', message: '' };
             console.info('[WB佣金] 已加载', source, Object.keys(normalized.categoryMap).length, '条');
             if (typeof tryRender === 'function') tryRender();
-            if (pageMode === 'list') queueListRender();
+            if (pageMode === 'list' || pageMode === 'detail') queueListRender();
         }
 
         function loadRemoteCommissionData() {
@@ -780,7 +785,7 @@
                         : { kind: 'error', message: '远程佣金表连接失败：中文类目和佣金表未加载' };
                     console.error('[WB佣金] 远程表加载失败', error);
                     if (typeof tryRender === 'function') tryRender();
-                    if (pageMode === 'list') queueListRender();
+                    if (pageMode === 'list' || pageMode === 'detail') queueListRender();
                 });
         }
 
@@ -850,6 +855,8 @@
             return products.length;
         }
         const listProductsByNm = new Map();
+        // 详情页推荐接口返回的商品 ID；仅这些卡片允许在详情页插入列表数据面板。
+        const detailRecommendNmIds = new Set();
         const listCardDataByNm = new Map();
         const listCardLoadStarted = new Set();
         let listCardLoadQueue = Promise.resolve();
@@ -963,10 +970,11 @@
         }
 
         function queueListCardDataLoads(nmIds) {
-            // 只服务列表页；详情页的上架时间/变体来自页面已加载的数据，不需要补抓。
-            // 列表页每个商品都要拿 card.json（上架时间 + 变体数），所以这里不再按 create_date 提前放行。
-            if (pageMode !== 'list') return;
+            // 列表页和详情页推荐卡都需要 card.json 补充上架时间、变体数等字段。
+            if (pageMode !== 'list' && pageMode !== 'detail') return;
             const pending = [...new Set(nmIds)].filter(nmId => {
+                // 详情页只允许补抓推荐接口返回的商品，避免触碰主商品及其他页面链接。
+                if (pageMode === 'detail' && !detailRecommendNmIds.has(nmId)) return false;
                 // 不再要求 listProductsByNm 里已有数据：图片搜索/店铺等页面的接口可能还没被识别，
                 // 只要卡片渲染出来了，就先用 basket 的 card.json 兜底填充。
                 return /^\d+$/.test(nmId) &&
@@ -995,7 +1003,7 @@
                             listCardLoadStarted.delete(nmId);
                         }
                     }));
-                    if (pageMode === 'list') queueListRender();
+                    if (pageMode === 'list' || pageMode === 'detail') queueListRender();
                 }
             });
         }
@@ -1035,22 +1043,25 @@
 
         function indexListProducts(data, sourceUrl = '') {
             const products = findProductsArray(data);
+            const nmIds = [];
+            const detailPage = (isDetailRoute() || pageMode === 'detail') && isDetailRecommendUrl(sourceUrl);
             for (const product of products) {
                 if (!product || typeof product !== 'object') continue;
                 const rawId = product.id ?? product.nmId ?? product.nm_id;
                 const nmId = rawId == null ? '' : String(rawId).trim();
-                if (/^\d+$/.test(nmId)) listProductsByNm.set(nmId, product);
+                if (!/^\d+$/.test(nmId)) continue;
+                listProductsByNm.set(nmId, product);
+                nmIds.push(nmId);
+                if (detailPage) detailRecommendNmIds.add(nmId);
             }
-            queueListCardDataLoads(products.map(product => {
-                const rawId = product?.id ?? product?.nmId ?? product?.nm_id;
-                return rawId == null ? '' : String(rawId).trim();
-            }));
-            console.debug('[WB列表] 搜索响应已处理', {
+            queueListCardDataLoads(nmIds);
+            console.debug('[WB列表] 商品集合响应已处理', {
                 products: products.length,
                 indexed: listProductsByNm.size,
+                detailRecommendations: detailPage ? detailRecommendNmIds.size : 0,
                 sourceUrl: String(sourceUrl).split('?')[0],
             });
-            if (pageMode === 'list') queueListRender();
+            if (pageMode === 'list' || pageMode === 'detail') queueListRender();
             return products.length;
         }
         function parseMeasure(value) {
@@ -1408,11 +1419,13 @@
         let listRenderQueued = false;
 
         function queueListRender() {
+            if (pageMode !== 'list' && pageMode !== 'detail') return;
+            if (pageMode === 'detail' && !detailRecommendNmIds.size) return;
             if (listRenderQueued) return;
             listRenderQueued = true;
             requestAnimationFrame(() => {
                 listRenderQueued = false;
-                if (pageMode === 'list') renderListPanels();
+                if (pageMode === 'list' || pageMode === 'detail') renderListPanels();
             });
         }
 
@@ -1666,9 +1679,18 @@
         }
 
         function renderListPanels() {
-            if (pageMode !== 'list') return;
-            const cards = getListProductCards();
-            // 列表页没有 card.json 接口，按渲染出来的卡片反推 basket 地址补抓上架时间。
+            if (pageMode !== 'list' && pageMode !== 'detail') return;
+            const allCards = getListProductCards();
+            const cards = pageMode === 'detail'
+                ? allCards.filter(([nmId]) => detailRecommendNmIds.has(nmId))
+                : allCards;
+            if (pageMode === 'detail') {
+                // 详情页只清理不再属于推荐接口结果的面板，主商品面板不受影响。
+                document.querySelectorAll('.wb-list-product-panel').forEach(panel => {
+                    if (!detailRecommendNmIds.has(panel.dataset.wbNmId || '')) panel.remove();
+                });
+            }
+            // 列表页和详情页推荐卡都按渲染出来的卡片补抓 basket card.json。
             // 先登记再渲染，第一帧就能显示「读取中…」；已加载/请求中/超过重试上限的会被内部过滤。
             queueListCardDataLoads(cards.map(([nmId]) => nmId));
             for (const [nmId, card] of cards) {
@@ -1797,7 +1819,19 @@
             });
         }
 
+        function resetDetailRecommendations() {
+            document.querySelectorAll('.wb-list-product-panel').forEach(panel => panel.remove());
+            detailRecommendNmIds.clear();
+            listProductsByNm.clear();
+            listCardDataByNm.clear();
+            listCardLoadStarted.clear();
+            listCardLoadFailures.clear();
+            listCardLoadQueue = Promise.resolve();
+            listRenderQueued = false;
+        }
+
         function leaveDetailMode() {
+            resetDetailRecommendations();
             detailObserver?.disconnect();
             detailObserver = null;
             insertQueued = false;
@@ -1910,7 +1944,10 @@
             ensurePanel();
             panelClosed = false;
             if (!detailObserver && document.body) {
-                detailObserver = new MutationObserver(queueInsert);
+                detailObserver = new MutationObserver(() => {
+                    queueInsert();
+                    queueListRender();
+                });
                 detailObserver.observe(document.documentElement, {
                     childList: true,
                     subtree: true,
@@ -1918,6 +1955,7 @@
             }
             lastRenderedNm = null;
             tryRender();
+            queueListRender();
             loadRemoteCommissionData();
             scheduleProductDataRecovery(getCurrentNmId());
         }
@@ -1993,6 +2031,7 @@
             const nextMode = resolvePageMode();
             if (nextMode === pageMode) {
                 if (nextMode === 'detail') {
+                    resetDetailRecommendations();
                     lastRenderedNm = null;
                     tryRender();
                     queueInsert();
