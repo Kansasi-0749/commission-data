@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         WB 商品数据窗口
 // @namespace    http://tampermonkey.net/
-// @version      17.2.3
+// @version      17.2.4
 // @updateURL    https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/wb-product-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/wb-product-panel.user.js
 // @description  拦截 Wildberries 商品接口，显示商品数据；一键跳转预算计算器并自动填充重量/尺寸/售价/类目；详情页/列表页/首页/店铺页/图片搜索页可分别开关
 // @match        https://www.wildberries.ru/*
 // @match        https://yadmin.sldeclat.com/site/index*
+// @match        https://yadmin.sldeclat.com/goods-shop/budget-calculator*
 // @run-at       document-start
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -3092,23 +3093,56 @@
             } catch (e) {}
         }
 
+        function readBudgetParams() {
+            return {
+                wb_weight: getParam('wb_weight'),
+                wb_volume: getParam('wb_volume'),
+                wb_price: getParam('wb_price'),
+                wb_subj_root_name: getParam('wb_subj_root_name'),
+                wb_subj_name: getParam('wb_subj_name'),
+            };
+        }
+
+        function hasBudgetParams(params) {
+            return Object.values(params).some(Boolean);
+        }
+
+        async function openCalculatorModal(params) {
+            const link = await waitFor('a[layadmin-event="budgetCalc"]');
+            const originalDataUrl = link.getAttribute('data-url');
+            const targetUrl = new URL(originalDataUrl || '/goods-shop/budget-calculator', location.origin);
+            for (const [key, value] of Object.entries(params)) {
+                if (value) targetUrl.searchParams.set(key, value);
+            }
+
+            link.setAttribute('data-url', `${targetUrl.pathname}${targetUrl.search}${targetUrl.hash}`);
+            link.click();
+            if (originalDataUrl == null) link.removeAttribute('data-url');
+            else link.setAttribute('data-url', originalDataUrl);
+            console.log('[预算填充] 已打开利润测算计算器:', targetUrl.href);
+        }
+
         async function main() {
-            const weight = getParam('wb_weight');
-            const volume = getParam('wb_volume');
-            const price  = getParam('wb_price');
-            const root   = getParam('wb_subj_root_name');
-            const subj   = getParam('wb_subj_name');
+            const params = readBudgetParams();
+            if (!hasBudgetParams(params)) return;
 
-            console.log('[预算填充] URL 参数:', { weight, volume, price, root, subj });
-            if (!weight && !volume && !price && !subj) return;
+            if (/^\/site\/index\/?$/.test(location.pathname)) {
+                try {
+                    await openCalculatorModal(params);
+                } catch (error) {
+                    console.warn('[预算填充] 未能打开利润测算计算器弹窗:', error);
+                }
+                return;
+            }
 
+            console.log('[预算填充] URL 参数:', params);
             try {
-                await fillWeight(weight);
-                await fillVolume(volume);
-                await fillPrice(price);
-                await fillWbCategory(root, subj);
-            } catch (e) {
-                console.warn('[预算填充] 出错:', e);
+                await fillWeight(params.wb_weight);
+                await fillVolume(params.wb_volume);
+                await fillPrice(params.wb_price);
+                await fillWbCategory(params.wb_subj_root_name, params.wb_subj_name);
+            } catch (error) {
+                console.warn('[预算填充] 出错:', error);
             }
         }
 
