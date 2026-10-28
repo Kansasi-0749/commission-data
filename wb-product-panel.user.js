@@ -2613,6 +2613,10 @@
                     const weight = (weightRaw == null || weightRaw === '') ? '' : Number(weightRaw);
                     const volume = (volumeRaw == null || volumeRaw === '') ? null : (Number(volumeRaw) / 10);
                     const dims = volume != null ? LWH_RULE(volume) : { length: '', width: '', height: '' };
+                    const wbId = product?.id ?? product?.nmId ?? product?.nm_id ?? getCurrentNmId() ?? '';
+                    const productUrl = wbId
+                        ? `https://www.wildberries.ru/catalog/${wbId}/detail.aspx?targetUrl=MI`
+                        : '';
 
                     const cells = [
                         fboCommission,
@@ -2623,7 +2627,7 @@
                         dims.height,
                         '',
                         '',
-                        '',
+                        productUrl,
                         '',
                         '',
                         '',
