@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WB 商品数据窗口
 // @namespace    http://tampermonkey.net/
-// @version      17.3.1
+// @version      17.3.5
 // @updateURL    https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/wb-product-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/wb-product-panel.user.js
 // @description  拦截 Wildberries 商品接口，显示商品数据；一键跳转预算计算器并自动填充重量/尺寸/售价/类目；详情页/列表页/首页/店铺页/图片搜索页可分别开关
@@ -30,20 +30,20 @@
     const BUDGET_URL = `https://${BUDGET_HOST}/goods-shop/budget-calculator`;
     const DEFAULT_DISCOUNT_PERCENT = 35;
     const LS_DISCOUNT_PERCENT = 'wb_budget_discount_percent';
-
+    
     const LWH_RULE = (volume) => {
         const v = Number(volume);
         if (!isFinite(v)) return null;
         return { length: Math.round(v * 10), width: 10, height: 10 };
     };
-
+    
     function getByPath(obj, path) {
         return path.split('.').reduce((acc, key) => {
             if (acc == null) return undefined;
             return acc[key];
         }, obj);
     }
-
+    
     function pickProductPrice(product) {
         if (!product) return null;
         if (Array.isArray(product.sizes)) {
@@ -64,7 +64,7 @@
         }
         return null;
     }
-
+    
     function setInputValue(el, value) {
         if (!el) return false;
         const proto = Object.getPrototypeOf(el);
@@ -75,7 +75,7 @@
         el.dispatchEvent(new Event('change', { bubbles: true }));
         return true;
     }
-
+    
     function waitFor(selector, timeout = 15000) {
         return new Promise((resolve, reject) => {
             const t0 = Date.now();
@@ -87,12 +87,12 @@
             })();
         });
     }
-
+    
     function getParam(name) {
         try { return new URL(location.href).searchParams.get(name) || ''; }
         catch (e) { return ''; }
     }
-
+    
     function getDiscountPercent() {
         const v = parseFloat(localStorage.getItem(LS_DISCOUNT_PERCENT));
         return isFinite(v) && v >= 0 && v < 100 ? v : DEFAULT_DISCOUNT_PERCENT;
@@ -110,15 +110,15 @@
         if (!isFinite(denom) || denom <= 0) return '';
         return (Number(productRaw) / 100 / denom).toFixed(2);
     }
-
+    
     if (location.hostname === 'www.wildberries.ru') initWildberries();
     else if (location.hostname === BUDGET_HOST) initBudgetCalculator();
-
+    
     // ============================================================
     // WB 端
     // ============================================================
     function initWildberries() {
-
+    
         const TARGET_DETAIL = '/__internal/u-card/cards/v4/detail';
         const TARGET_CARD   = '/info/ru/card.json';
         const SEARCH_PRODUCTS_URL = /\/__internal\/u-search\/[^?#]*\/search(?:[?#]|$)/i;
@@ -170,7 +170,7 @@
         function isKnownListRoute() {
             return LIST_ROUTE_PATTERNS.some(pattern => pattern.test(location.pathname));
         }
-
+    
         // 佣金表优先从远程文件读取（Gitee 优先，GitHub 保底），油猴缓存作为兜底。
         const REMOTE_COMMISSION_ENDPOINTS = [
             {
@@ -195,7 +195,7 @@
         let remoteCommissionLoadStarted = false;
         let remoteCommissionStatus = { kind: 'loading', message: '正在连接远程佣金表…' };
         let REMOTE_CATEGORY_ID_MAP = {};
-
+    
         function normalizeCategoryId(value) {
             if (typeof value === 'number') return Number.isSafeInteger(value) ? String(value) : '';
             const raw = String(value == null ? '' : value).trim();
@@ -203,13 +203,13 @@
             const numeric = Number(raw);
             return Number.isSafeInteger(numeric) ? String(numeric) : '';
         }
-
+    
         function makeRemoteIdCategoryKey(rootId, subjectId) {
             const rootKey = normalizeCategoryId(rootId);
             const subjectKey = normalizeCategoryId(subjectId);
             return rootKey && subjectKey ? rootKey + ':' + subjectKey : '';
         }
-
+    
         function readCommissionValues(record) {
             const source = record && (record['佣金'] || record.commission);
             const values = Array.isArray(source)
@@ -221,7 +221,7 @@
                 ? values.slice(0, 3)
                 : [];
         }
-
+    
         function normalizeCategoryRecordMap(map) {
             const normalized = {};
             for (const [key, record] of Object.entries(map || {})) {
@@ -243,10 +243,10 @@
             if (!Object.keys(normalized).length) throw new Error('类目表没有有效记录');
             return normalized;
         }
-
+    
         function extractRemoteCommissionData(payload) {
             if (!Array.isArray(payload)) throw new Error('佣金 JSON 必须是一级类目数组');
-
+    
             const categoryMap = {};
             const seenRootIds = new Set();
             for (const root of payload) {
@@ -276,7 +276,7 @@
                 categoryMap: normalizeCategoryRecordMap(categoryMap),
             };
         }
-
+    
         function normalizeRemoteCommissionData(data) {
             if (!data || typeof data !== 'object') throw new Error('远程佣金数据为空');
             const categoryMap = normalizeCategoryRecordMap(data.categoryMap);
@@ -290,19 +290,19 @@
             }
             return { categoryMap, idCategoryMap };
         }
-
+    
         function findRemoteCategoryData(rootId, subjectId) {
             const rootKey = normalizeCategoryId(rootId);
             const subjectKey = normalizeCategoryId(subjectId);
             if (!rootKey || !subjectKey) return null;
             return REMOTE_CATEGORY_ID_MAP[rootKey]?.[subjectKey] || null;
         }
-
+    
         function findProductCommission(rootId, subjectId) {
             const record = findRemoteCategoryData(rootId, subjectId);
             return record && record.commission.length ? record.commission : null;
         }
-
+    
         // 依次尝试 Gitee（Raw → API）、GitHub（Raw → API），任一成功即返回。
         function requestRemoteCommission() {
             return new Promise((resolve, reject) => {
@@ -312,7 +312,7 @@
                 }
                 const failures = [];
                 let endpointIndex = 0;
-
+    
                 function parsePayload(responseText) {
                     const text = String(responseText || '').replace(/^\uFEFF/, '').trim();
                     let payload = JSON.parse(text);
@@ -324,19 +324,19 @@
                     if (!Array.isArray(payload)) throw new Error('响应不是一级类目数组');
                     return payload;
                 }
-
+    
                 function fail(label, reason) {
                     failures.push(`${label} ${reason}`);
                     console.warn(`[WB佣金] ${label} 失败：${reason}`);
                     tryNextEndpoint();
                 }
-
+    
                 function tryNextEndpoint() {
                     if (endpointIndex >= REMOTE_COMMISSION_ENDPOINTS.length) {
                         reject(new Error(failures.join('；')));
                         return;
                     }
-
+    
                     const endpoint = REMOTE_COMMISSION_ENDPOINTS[endpointIndex++];
                     const label = endpoint.label;
                     try {
@@ -365,11 +365,11 @@
                         fail(label, error.message);
                     }
                 }
-
+    
                 tryNextEndpoint();
             });
         }
-
+    
         function requestRemoteText(url, withCredentials = false) {
             return new Promise((resolve, reject) => {
                 if (typeof GM_xmlhttpRequest !== 'function') {
@@ -399,7 +399,7 @@
                 }
             });
         }
-
+    
         function resolveFeedbackHost(responseText) {
             const raw = String(responseText || '').trim();
             let payload;
@@ -418,7 +418,7 @@
             }
             throw new Error('主机接口未返回有效的 feedback-view 地址');
         }
-
+    
         function getFeedbackRows(payload) {
             if (Array.isArray(payload)) return payload;
             const queue = [payload];
@@ -434,7 +434,7 @@
             }
             throw new Error('评论接口响应中没有 feedbacks 列表');
         }
-
+    
         function getQuestionRows(payload) {
             if (Array.isArray(payload)) return payload;
             const queue = [payload];
@@ -452,7 +452,7 @@
             }
             throw new Error('问题接口响应中没有问题列表');
         }
-
+    
         function xmlEscape(value) {
             return String(value == null ? '' : value)
                 .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g, '')
@@ -462,7 +462,7 @@
                 .replace(/"/g, '&quot;')
                 .replace(/'/g, '&apos;');
         }
-
+    
         function splitFeedbackTimestamp(value) {
             const raw = String(value == null ? '' : value).trim();
             if (!raw) return ['', ''];
@@ -470,7 +470,7 @@
             if (match) return [match[1], match[2]];
             return [raw, ''];
         }
-
+    
         function buildFeedbackWorksheet(rows, fallbackNmId) {
             const headers = ['WB编号', '用户名', '星级', '评论内容', '卖家回复', '屏蔽', '尺码', '颜色', '评论日期', '评论时间', '更新日期', '更新时间', '状态ID'];
             const columnWidths = [14, 18, 8, 50, 50, 12, 12, 12, 14, 12, 14, 12, 10];
@@ -517,7 +517,7 @@
                 `<sheetViews><sheetView workbookViewId="0"/></sheetViews>` +
                 `<sheetFormatPr defaultRowHeight="15"/><cols>${colsXml}</cols><sheetData>${rowXml}</sheetData></worksheet>`;
         }
-
+    
         function buildQuestionWorksheet(rows, fallbackNmId) {
             const headers = ['WB编号', '用户名', '问题内容', '卖家回复', '提问日期', '提问时间'];
             const columnWidths = [14, 18, 50, 50, 14, 12];
@@ -556,7 +556,7 @@
                 `<sheetViews><sheetView workbookViewId="0"/></sheetViews>` +
                 `<sheetFormatPr defaultRowHeight="15"/><cols>${colsXml}</cols><sheetData>${rowXml}</sheetData></worksheet>`;
         }
-
+    
         // XLSX is a ZIP package; store its XML entries without compression.
         function createXlsxBlob(files) {
             const encoder = new TextEncoder();
@@ -573,7 +573,7 @@
                 for (const byte of bytes) crc = crcTable[(crc ^ byte) & 0xFF] ^ (crc >>> 8);
                 return (crc ^ 0xFFFFFFFF) >>> 0;
             };
-
+    
             const localParts = [];
             const centralParts = [];
             let localOffset = 0;
@@ -592,7 +592,7 @@
                 localView.setUint16(26, nameBytes.length, true);
                 localHeader.set(nameBytes, 30);
                 localParts.push(localHeader, data);
-
+    
                 const centralHeader = new Uint8Array(46 + nameBytes.length);
                 const centralView = new DataView(centralHeader.buffer);
                 centralView.setUint32(0, 0x02014B50, true);
@@ -608,7 +608,7 @@
                 centralParts.push(centralHeader);
                 localOffset += localHeader.length + data.length;
             }
-
+    
             const centralSize = centralParts.reduce((size, part) => size + part.length, 0);
             const endRecord = new Uint8Array(22);
             const endView = new DataView(endRecord.buffer);
@@ -618,12 +618,12 @@
             endView.setUint16(10, fileCount, true);
             endView.setUint32(12, centralSize, true);
             endView.setUint32(16, localOffset, true);
-
+    
             return new Blob([...localParts, ...centralParts, endRecord], {
                 type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             });
         }
-
+    
         function buildXlsxFiles(sheetName, worksheetXml) {
             return {
                 '[Content_Types].xml': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
@@ -648,7 +648,7 @@
                 'xl/worksheets/sheet1.xml': worksheetXml,
             };
         }
-
+    
         function saveXlsxFile(files, filename) {
             const blob = createXlsxBlob(files);
             const objectUrl = URL.createObjectURL(blob);
@@ -660,14 +660,14 @@
             link.remove();
             window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
         }
-
+    
         // 评论/提问为空时不要生成空表，用这个错误让调用方给出「无数据」提示。
         function createEmptyDataError(message) {
             const error = new Error(message);
             error.wbEmptyData = true;
             return error;
         }
-
+    
         async function downloadProductFeedback(imtId, nmId) {
             const hostResponse = await requestRemoteText(
                 `https://feedback-bt.wildberries.ru/feedback/api/v2/host?imt=${encodeURIComponent(imtId)}`
@@ -690,14 +690,14 @@
             saveXlsxFile(buildXlsxFiles('评论', buildFeedbackWorksheet(feedbackRows, nmId)),
                 `WB商品评论_${nmId || imtId}.xlsx`);
         }
-
+    
         async function downloadProductQuestions(imtId, nmId) {
             const take = 30;
             const rows = [];
             const seen = new Set();
             let skip = 0;
             let reachedEnd = false;
-
+    
             for (let page = 0; page < 1000; page++) {
                 const url = `https://questions.wildberries.ru/api/v1/questions?imtId=${encodeURIComponent(imtId)}&take=${take}&skip=${skip}`;
                 const payload = JSON.parse(await requestRemoteText(url, true));
@@ -715,7 +715,7 @@
                     reachedEnd = true;
                     break;
                 }
-
+    
                 let added = 0;
                 for (const question of pageRows) {
                     const id = question?.id ?? question?.questionId ?? question?.question_id;
@@ -731,13 +731,13 @@
                     break;
                 }
             }
-
+    
             if (!reachedEnd) throw new Error('问题分页超过安全上限');
             if (!rows.length) throw createEmptyDataError('提问为空');
             const files = buildXlsxFiles('提问', buildQuestionWorksheet(rows, nmId));
             saveXlsxFile(files, `WB商品提问_${nmId || imtId}.xlsx`);
         }
-
+    
         function applyRemoteCommissionData(data, source) {
             const normalized = normalizeRemoteCommissionData(data);
             REMOTE_CATEGORY_ID_MAP = normalized.idCategoryMap;
@@ -746,14 +746,14 @@
             if (typeof tryRender === 'function') tryRender();
             if (pageMode === 'list' || pageMode === 'detail') queueListRender();
         }
-
+    
         function loadRemoteCommissionData() {
             if (remoteCommissionLoadStarted) return;
             remoteCommissionLoadStarted = true;
-
+    
             let cached = null;
             try { cached = GM_getValue(REMOTE_COMMISSION_CACHE_KEY, null); } catch (e) {}
-
+    
             if (cached && cached.data) {
                 try {
                     applyRemoteCommissionData(cached.data, '本地缓存');
@@ -761,10 +761,10 @@
                 }
                 catch (e) { cached = null; }
             }
-
+    
             const savedAt = Number(cached && cached.savedAt);
             if (savedAt && Date.now() - savedAt < REMOTE_COMMISSION_CACHE_TTL) return;
-
+    
             requestRemoteCommission()
                 .then(({ payload, label }) => {
                     const data = extractRemoteCommissionData(payload);
@@ -788,7 +788,7 @@
                     if (pageMode === 'list' || pageMode === 'detail') queueListRender();
                 });
         }
-
+    
         const FIELDS = [
             { label: '体积', path: 'volume', transform: v => (Number(v) / 10).toFixed(1) + ' 升', compact: true },
             { label: '尺寸体积', path: '__card__.package_volume', compact: true },
@@ -798,7 +798,7 @@
             { label: '上架时间', path: '__card__.create_date', valueBold: true,
               transform: v => formatCreatedAtWithAge(v) },
         ];
-
+    
         function getCurrentNmId() {
             const m = location.pathname.match(/\/catalog\/(\d+)\/detail/);
             return m ? m[1] : null;
@@ -860,7 +860,7 @@
         const listCardDataByNm = new Map();
         const listCardLoadStarted = new Set();
         let listCardLoadQueue = Promise.resolve();
-
+    
         // ===== 搜索页 card.json 补抓（basket CDN） =====
         // 搜索接口不返回上架时间，也不返回变体数（它的 colors 是颜色名），
         // 但商品图片和 card.json 都挂在 basket CDN 上，可以按 nmId 反推静态地址：
@@ -887,7 +887,7 @@
             [21126, 21893], [21894, 22661], [22662, 23429], [23430, 24197], [24198, 24965],
             [24966, 25733], [25734, 26501], [26502, 27269], [27270, 28037], [28038, 28805],
         ];
-
+    
         function getBasketHostByVol(vol) {
             for (let index = 0; index < BASKET_VOL_RANGES.length; index++) {
                 const [from, to] = BASKET_VOL_RANGES[index];
@@ -897,7 +897,7 @@
             }
             return '';
         }
-
+    
         function buildBasketCardUrl(nmId) {
             const nm = Number(nmId);
             if (!Number.isSafeInteger(nm) || nm <= 0) return '';
@@ -907,12 +907,12 @@
             const part = Math.floor(nm / 1000);
             return `https://${host}/vol${vol}/part${part}/${nm}/info/ru/card.json`;
         }
-
+    
         // 依次尝试：CDN 直连（能命中浏览器缓存）→ 油猴请求（绕过 CORS）→ 同源接口。
         async function requestListCardJson(nmId) {
             const canFetch = typeof origFetch === 'function';
             const cdnUrl = buildBasketCardUrl(nmId);
-
+    
             if (cdnUrl && canFetch) {
                 try {
                     // CDN 是跨域静态资源：不能带 credentials，否则通配符 ACAO 会被浏览器拒绝。
@@ -930,7 +930,7 @@
                     console.debug('[WB列表] basket 直连失败，改用油猴请求', nmId, error && error.message);
                 }
             }
-
+    
             if (cdnUrl) {
                 try {
                     const text = await requestRemoteText(cdnUrl);
@@ -940,7 +940,7 @@
                     console.debug('[WB列表] basket 油猴请求失败', nmId, error && error.message);
                 }
             }
-
+    
             if (!canFetch) return null;
             const fallbackUrl = `${location.origin}/catalog/${nmId}/info/ru/card.json`;
             const response = await origFetch.call(PAGE_WINDOW, fallbackUrl, {
@@ -951,10 +951,10 @@
             const data = await response.json();
             return data && typeof data === 'object' ? data : null;
         }
-
+    
         const LIST_CARD_MAX_ATTEMPTS = 3;
         const listCardLoadFailures = new Map();
-
+    
         function noteListCardFailure(nmId) {
             const attempts = (listCardLoadFailures.get(nmId)?.attempts || 0) + 1;
             listCardLoadFailures.set(nmId, {
@@ -962,13 +962,13 @@
                 nextAt: Date.now() + Math.min(attempts * 15000, 120000),
             });
         }
-
+    
         function canRetryListCard(nmId) {
             const failure = listCardLoadFailures.get(nmId);
             if (!failure) return true;
             return failure.attempts < LIST_CARD_MAX_ATTEMPTS && Date.now() >= failure.nextAt;
         }
-
+    
         function queueListCardDataLoads(nmIds) {
             // 列表页和详情页推荐卡都需要 card.json 补充上架时间、变体数等字段。
             if (pageMode !== 'list' && pageMode !== 'detail') return;
@@ -1007,7 +1007,7 @@
                 }
             });
         }
-
+    
         // 接口版本很多（u-search / v4 / v5 / seller catalog …），products 数组的层级不固定，
         // 这里做有限深度的广度优先查找，避免每换一个接口就漏抓一次。
         function findProductsArray(payload) {
@@ -1040,7 +1040,7 @@
             }
             return [];
         }
-
+    
         function indexListProducts(data, sourceUrl = '') {
             const products = findProductsArray(data);
             const nmIds = [];
@@ -1120,12 +1120,12 @@
                 const item = names.find(x => String(x?.name || '').trim() === name);
                 return item ? parseMeasure(item.value) : null;
             };
-
+    
             const length = findValue('Длина упаковки');
             const height = findValue('Высота упаковки');
             const width = findValue('Ширина упаковки');
             if (![length, height, width].every(Number.isFinite)) return '';
-
+    
             const fmt = value => Number.isInteger(value) ? String(value) : String(Number(value.toFixed(2)));
             const volume = (length * width * height / 1000).toFixed(2);
             return `${fmt(length)}x${fmt(width)}x${fmt(height)}=${volume}升`;
@@ -1172,7 +1172,7 @@
                 } catch (e) { reject(e); }
             });
         }
-
+    
         // 轻量提示：传了锚点元素就贴着它显示（气泡 + 箭头），否则回退到页面底部居中。
         let toastEl = null;
         let toastTextEl = null;
@@ -1181,7 +1181,7 @@
         let toastFrame = 0;
         let toastAnchor = null;
         let toastVisible = false;
-
+    
         function ensureToast() {
             if (toastEl) return;
             toastEl = document.createElement('div');
@@ -1205,21 +1205,21 @@
             toastArrowEl = document.createElement('div');
             toastEl.append(toastTextEl, toastArrowEl);
         }
-
+    
         function positionToast() {
             if (!toastEl || !toastEl.isConnected) return;
             const rect = toastEl.getBoundingClientRect();
             const width = rect.width;
             const height = rect.height;
             if (!width || !height) return;
-
+    
             const vw = document.documentElement.clientWidth;
             const vh = document.documentElement.clientHeight;
             const margin = 8;
             const gap = 10;
             let left;
             let top;
-
+    
             const anchor = toastAnchor && toastAnchor.isConnected ? toastAnchor : null;
             if (anchor) {
                 const box = anchor.getBoundingClientRect();
@@ -1234,7 +1234,7 @@
                 }
                 left = Math.max(margin, Math.min(left, vw - width - margin));
                 top = Math.max(margin, Math.min(top, vh - height - margin));
-
+    
                 const arrowX = Math.max(14, Math.min(anchorX - left, width - 14));
                 const arrowCss = `position:absolute; left:${Math.round(arrowX - 6)}px; width:0; height:0;` +
                     ' border-left:6px solid transparent; border-right:6px solid transparent;' +
@@ -1252,18 +1252,18 @@
                 top = vh - height - 24;
                 if (toastArrowEl.style.display !== 'none') toastArrowEl.style.display = 'none';
             }
-
+    
             const leftPx = Math.round(left) + 'px';
             const topPx = Math.round(top) + 'px';
             if (toastEl.style.left !== leftPx) toastEl.style.left = leftPx;
             if (toastEl.style.top !== topPx) toastEl.style.top = topPx;
         }
-
+    
         function stopToastTracking() {
             if (toastFrame) window.cancelAnimationFrame(toastFrame);
             toastFrame = 0;
         }
-
+    
         // 气泡显示的这段时间里跟着按钮走（滚动/布局变化都不会跑偏）
         function startToastTracking() {
             stopToastTracking();
@@ -1275,7 +1275,7 @@
             };
             toastFrame = window.requestAnimationFrame(tick);
         }
-
+    
         function hideToast() {
             if (toastTimer !== null) window.clearTimeout(toastTimer);
             toastTimer = null;
@@ -1285,7 +1285,7 @@
             toastEl.style.opacity = '0';
             toastEl.style.transform = 'translateY(4px)';
         }
-
+    
         function showToast(message, anchor = null) {
             if (!message) return;
             ensureToast();
@@ -1300,12 +1300,12 @@
             if (toastTimer !== null) window.clearTimeout(toastTimer);
             toastTimer = window.setTimeout(hideToast, 2400);
         }
-
+    
         // ===== 页面类型总开关浮标 =====
         // 五类页面可以各自开关；浮标常驻右下角，关掉某一类后也能随时改回去。
         let kindToggleEl = null;
         let kindToggleOpen = false;
-
+    
         function ensureKindToggle() {
             if (kindToggleEl) return kindToggleEl;
             const root = document.createElement('div');
@@ -1314,7 +1314,7 @@
                 position:fixed; right:12px; bottom:12px; z-index:2147483000;
                 font-family:-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
             `;
-
+    
             const menu = document.createElement('div');
             menu.style.cssText = `
                 display:none; margin-bottom:6px; padding:8px 10px; min-width:184px;
@@ -1322,12 +1322,12 @@
                 box-shadow:0 4px 16px rgba(0,0,0,.16); border:1px solid #f0e0ee;
                 font-size:12px; line-height:1.5;
             `;
-
+    
             const title = document.createElement('div');
             title.textContent = '面板显示范围';
             title.style.cssText = `font-weight:600; color:#cb11ab; margin-bottom:4px;`;
             menu.appendChild(title);
-
+    
             for (const [kind, meta] of Object.entries(PAGE_KINDS)) {
                 const row = document.createElement('label');
                 row.style.cssText = `display:flex; align-items:flex-start; gap:6px; padding:3px 0; cursor:pointer;`;
@@ -1352,7 +1352,7 @@
                 row.append(box, text);
                 menu.appendChild(row);
             }
-
+    
             const button = document.createElement('button');
             button.type = 'button';
             button.textContent = '面板';
@@ -1369,13 +1369,13 @@
                 kindToggleOpen = !kindToggleOpen;
                 menu.style.display = kindToggleOpen ? 'block' : 'none';
             });
-
+    
             root.append(menu, button);
             document.body.appendChild(root);
             kindToggleEl = root;
             return root;
         }
-
+    
         function applyPageKindChange() {
             stopUnknownRouteProbe();
             if (pageMode === 'detail') leaveDetailMode();
@@ -1384,10 +1384,10 @@
             updatePageKindHint();
             switchPageMode();
         }
-
+    
         // 当前页面类型被关闭时，给一条一次性提示，避免“以为脚本坏了”。
         let pageKindHintPath = '';
-
+    
         function updatePageKindHint() {
             // SPA 会整块替换 body，浮标可能被一起删掉，这里顺手挂回去。
             if (kindToggleEl && !kindToggleEl.isConnected && document.body) {
@@ -1403,7 +1403,7 @@
             pageKindHintPath = marker;
             showToast(`${PAGE_KINDS[kind].label}面板已关闭，可在右下角「面板」里重新打开`);
         }
-
+    
         let panelEl = null, bodyEl = null;
         let panelPlacementNm = null;
         let pageMode = null;
@@ -1417,7 +1417,7 @@
         let productLoadNm = null;
         let listObserver = null;
         let listRenderQueued = false;
-
+    
         function queueListRender() {
             if (pageMode !== 'list' && pageMode !== 'detail') return;
             if (pageMode === 'detail' && !detailRecommendNmIds.size) return;
@@ -1428,12 +1428,12 @@
                 if (pageMode === 'list' || pageMode === 'detail') renderListPanels();
             });
         }
-
+    
         function getNmFromCatalogHref(href) {
             const match = String(href || '').match(/\/catalog\/(\d+)\/detail(?:\.aspx)?(?:[/?#]|$)/i);
             return match ? match[1] : '';
         }
-
+    
         function getListCardNmId(card) {
             for (const key of ['data-nm-id', 'data-popup-nm-id', 'data-nm', 'data-nmid']) {
                 const value = card.getAttribute(key);
@@ -1444,7 +1444,15 @@
                 : card.querySelector('a[href*="/catalog/"]');
             return getNmFromCatalogHref(link?.getAttribute('href'));
         }
-
+    
+        // 详情页的颜色/规格缩略图也带有商品详情链接和 data-nm-id，
+        // 但它们不是推荐商品卡，不能把列表面板插进横向缩略图滑块。
+        function isDetailVariantSlideNode(node) {
+            if (pageMode !== 'detail' || !node || node.nodeType !== 1) return false;
+            const slide = node.closest('.swiper-slide, [class*="slide--"]');
+            return Boolean(slide && slide.querySelector('a[href*="/catalog/"] [class*="colorImage"]'));
+        }
+    
         // 未知卡片结构时的兜底：从商品详情链接往上找一块尺寸合理的祖先当容器。
         // 只在精确选择器一个都没命中时才跑，避免给正常页面增加布局开销。
         function findGenericCardHost(link) {
@@ -1457,38 +1465,40 @@
             }
             return null;
         }
-
+    
         function getListProductCards() {
             const cards = [];
             const seenCards = new Set();
             const addCard = candidate => {
                 if (!candidate || candidate === document.body) return;
                 const source = candidate;
+                if (isDetailVariantSlideNode(source)) return;
                 const node = candidate.tagName === 'A' ? candidate.parentElement : candidate;
-                if (!node) return;
+                if (!node || isDetailVariantSlideNode(node)) return;
                 const card = node.matches('article.product-card, .product-card')
                     ? node
                     : node.closest('article.product-card, .product-card') || node;
-                if (!card || card.tagName === 'A' || seenCards.has(card)) return;
+                if (!card || card.tagName === 'A' || isDetailVariantSlideNode(card) || seenCards.has(card)) return;
                 const nmId = getListCardNmId(card) || getListCardNmId(source);
                 if (!nmId) return;
                 seenCards.add(card);
                 cards.push([nmId, card]);
             };
-
+    
             document.querySelectorAll('article.product-card, article[data-nm-id], article[data-popup-nm-id], .product-card, [data-nm-id], [data-popup-nm-id], [data-nm], [data-nmid]')
                 .forEach(addCard);
             document.querySelectorAll('a[href*="/catalog/"][href*="/detail"]')
                 .forEach(link => addCard(link.closest('article.product-card, .product-card, [data-nm-id], [data-popup-nm-id], [data-nm], [data-nmid], article')));
-
+    
             if (!cards.length) {
                 // 完全认不出的版式（图片搜索/店铺新模板等）：用详情链接 + 几何尺寸兜底。
                 document.querySelectorAll('a[href*="/catalog/"][href*="/detail"]')
                     .forEach(link => {
-                        if (cards.length >= 200) return;
+                        if (cards.length >= 200 || isDetailVariantSlideNode(link)) return;
                         const nmId = getNmFromCatalogHref(link.getAttribute('href'));
                         if (!nmId) return;
                         const host = findGenericCardHost(link);
+                        if (isDetailVariantSlideNode(host)) return;
                         if (!host || seenCards.has(host)) return;
                         seenCards.add(host);
                         cards.push([nmId, host]);
@@ -1496,11 +1506,11 @@
             }
             return cards;
         }
-
+    
         function listDisplayValue(value) {
             return value == null || value === '' ? '—' : String(value);
         }
-
+    
         // 详情页与列表页共用：`YYYY-MM-DD（距今天数/月数）`。
         function formatCreatedAtWithAge(value) {
             if (value == null || value === '') return '—';
@@ -1516,7 +1526,7 @@
                 createdAt = new Date(raw);
             }
             if (Number.isNaN(createdAt.getTime())) return '—';
-
+    
             const year = createdAt.getFullYear();
             const month = createdAt.getMonth();
             const day = createdAt.getDate();
@@ -1526,7 +1536,7 @@
             today.setHours(0, 0, 0, 0);
             const createdDay = new Date(year, month, day);
             if (createdDay > today) return '—';
-
+    
             let fullMonths = (today.getFullYear() - year) * 12 + today.getMonth() - month;
             const anchorMonth = month + fullMonths;
             const anchorYear = year + Math.floor(anchorMonth / 12);
@@ -1538,7 +1548,7 @@
                 Math.min(day, lastDayOfAnchorMonth),
             );
             if (monthAnniversary > today) fullMonths--;
-
+    
             let age;
             if (fullMonths >= 12) {
                 const years = Math.floor(fullMonths / 12);
@@ -1554,7 +1564,7 @@
             }
             return `${dateText}（${age}）`;
         }
-
+    
         function makeListField(label, value, href = '') {
             const field = document.createElement('div');
             field.style.cssText = 'min-width:0;min-height:30px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;gap:1px;padding:3px 5px;border-left:2px solid #e8c4e2;border-radius:4px;background:#f8f7f8;';
@@ -1575,7 +1585,7 @@
             field.append(labelEl, valueEl);
             return field;
         }
-
+    
         function updateListPanel(panel, nmId, product) {
             // card.json 是列表页唯一稳定的数据源：店铺页/图片搜索的接口结构各不相同，
             // 拿不到 product 时至少还能从 card.json 里读出上架时间、类目、体积、变体数。
@@ -1629,7 +1639,7 @@
             if (skuEl) skuEl.textContent = `SKU ${nmId}`;
             if (!bodyEl) return;
             bodyEl.replaceChildren();
-
+    
             if (!product && !cardData) {
                 const loadingEl = document.createElement('div');
                 loadingEl.textContent = cardLoading ? '正在读取商品数据…' : '未捕获到商品数据';
@@ -1637,7 +1647,7 @@
                 bodyEl.appendChild(loadingEl);
                 return;
             }
-
+    
             const sellerText = listDisplayValue(supplierName || supplierId);
             const sellerUrl = supplierId ? `https://www.wildberries.ru/seller/${supplierId}` : '';
             const createdAtField = makeListField('上架时间', createdAt);
@@ -1654,13 +1664,13 @@
                 createdAtField,
             );
         }
-
+    
         function getListPanelHost(card) {
             return card.querySelector(':scope > .product-card__wrapper')
                 || card.querySelector('.product-card__wrapper')
                 || card;
         }
-
+    
         function fixListCardHeight(card) {
             const catalogCards = [];
             if (card.matches('[class*="catalogCard--"]')) catalogCards.push(card);
@@ -1677,7 +1687,7 @@
                 }
             }
         }
-
+    
         function renderListPanels() {
             if (pageMode !== 'list' && pageMode !== 'detail') return;
             const allCards = getListProductCards();
@@ -1686,8 +1696,10 @@
                 : allCards;
             if (pageMode === 'detail') {
                 // 详情页只清理不再属于推荐接口结果的面板，主商品面板不受影响。
+                // 变体缩略图也可能带 data-nm-id，清理旧版本误插进 swiper 的面板。
                 document.querySelectorAll('.wb-list-product-panel').forEach(panel => {
-                    if (!detailRecommendNmIds.has(panel.dataset.wbNmId || '')) panel.remove();
+                    if (!detailRecommendNmIds.has(panel.dataset.wbNmId || '') ||
+                        isDetailVariantSlideNode(panel)) panel.remove();
                 });
             }
             // 列表页和详情页推荐卡都按渲染出来的卡片补抓 basket card.json。
@@ -1696,6 +1708,7 @@
             for (const [nmId, card] of cards) {
                 fixListCardHeight(card);
                 const host = getListPanelHost(card);
+                if (!host || isDetailVariantSlideNode(host)) continue;
                 let panel = card.querySelector('.wb-list-product-panel');
                 if (!panel) {
                     panel = document.createElement('div');
@@ -1746,7 +1759,7 @@
                 updateListPanel(panel, nmId, listProductsByNm.get(nmId) || null);
             }
         }
-
+    
         function enterListMode() {
             if (pageMode !== 'list') return;
             if (!document.body) {
@@ -1760,7 +1773,7 @@
             loadRemoteCommissionData();
             queueListRender();
         }
-
+    
         function leaveListMode() {
             listObserver?.disconnect();
             listObserver = null;
@@ -1772,7 +1785,7 @@
             listCardLoadFailures.clear();
             listCardLoadQueue = Promise.resolve();
         }
-
+    
         function ensureDetailState() {
             if (!window.__WB_CAPTURED__ || typeof window.__WB_CAPTURED__ !== 'object') {
                 window.__WB_CAPTURED__ = Object.create(null);
@@ -1787,13 +1800,13 @@
                 window.__WB_CARD_URLS__ = Object.create(null);
             }
         }
-
+    
         function clearProductLoadTimeout() {
             if (productLoadTimer !== null) window.clearTimeout(productLoadTimer);
             productLoadTimer = null;
             productLoadNm = null;
         }
-
+    
         function scheduleProductLoadTimeout(nmId) {
             if (productLoadTimer !== null && productLoadNm === nmId) return;
             clearProductLoadTimeout();
@@ -1809,7 +1822,7 @@
                 }
             }, 10000);
         }
-
+    
         function queueInsert() {
             if (insertQueued) return;
             insertQueued = true;
@@ -1818,7 +1831,7 @@
                 if (pageMode === 'detail' && panelEl && !panelClosed) insertIntoPage();
             });
         }
-
+    
         function resetDetailRecommendations() {
             document.querySelectorAll('.wb-list-product-panel').forEach(panel => panel.remove());
             detailRecommendNmIds.clear();
@@ -1829,7 +1842,7 @@
             listCardLoadQueue = Promise.resolve();
             listRenderQueued = false;
         }
-
+    
         function leaveDetailMode() {
             resetDetailRecommendations();
             detailObserver?.disconnect();
@@ -1849,7 +1862,7 @@
             recoveredCardUrls.clear();
             recoveredDetailUrls.clear();
         }
-
+    
         function ensurePanel() {
             if (panelEl) return;
             ensureDetailState();
@@ -1932,7 +1945,7 @@
             panelEl.appendChild(header);
             panelEl.appendChild(bodyEl);
         }
-
+    
         function enterDetailMode() {
             if (pageMode !== 'detail') return;
             installNetworkHooks();
@@ -1959,7 +1972,7 @@
             loadRemoteCommissionData();
             scheduleProductDataRecovery(getCurrentNmId());
         }
-
+    
         // ===== 页面类型（可分别开关）=====
         const PAGE_KINDS = {
             detail: { label: '详情页', desc: '/catalog/{nmId}/detail' },
@@ -1970,7 +1983,7 @@
         };
         const PAGE_KIND_SETTING_KEY = 'wb_panel_page_kinds_v1';
         let pageKindEnabled = null;
-
+    
         function readStoredPageKindEnabled() {
             let raw = null;
             try { raw = GM_getValue(PAGE_KIND_SETTING_KEY, null); } catch (e) {}
@@ -1979,7 +1992,7 @@
             }
             return raw && typeof raw === 'object' ? raw : null;
         }
-
+    
         function getPageKindEnabled() {
             if (pageKindEnabled) return pageKindEnabled;
             const stored = readStoredPageKindEnabled() || {};
@@ -1989,18 +2002,18 @@
             }
             return pageKindEnabled;
         }
-
+    
         function isPageKindEnabled(kind) {
             return Boolean(kind) && PAGE_KINDS[kind] && getPageKindEnabled()[kind] !== false;
         }
-
+    
         function setPageKindEnabled(kind, enabled) {
             if (!PAGE_KINDS[kind]) return;
             pageKindEnabled = { ...getPageKindEnabled(), [kind]: Boolean(enabled) };
             try { GM_setValue(PAGE_KIND_SETTING_KEY, pageKindEnabled); } catch (e) {}
             try { localStorage.setItem(PAGE_KIND_SETTING_KEY, JSON.stringify(pageKindEnabled)); } catch (e) {}
         }
-
+    
         // 路由无法识别时的兜底：直接用 DOM 证据判定是不是卡片网格页。
         // WB 上新模板很快（图片搜索 / 店铺新橱窗等），路径表追不上时就靠这个。
         function countDetailLinks() {
@@ -2009,7 +2022,7 @@
         function hasProductCardEvidence() {
             return countDetailLinks() >= 4;
         }
-
+    
         function resolvePageKind() {
             if (isDetailRoute()) return 'detail';
             if (isHomeRoute()) return 'home';
@@ -2019,14 +2032,14 @@
             // 非商品集合区（购物篮、订单…）也可能零星出现详情链接，要求有规模才判定为列表页。
             return hasProductCardEvidence() ? 'list' : null;
         }
-
+    
         // 页面类型 → 工作模式。类型被关掉时返回 null，即不渲染任何面板。
         function resolvePageMode() {
             const kind = resolvePageKind();
             if (!kind || !isPageKindEnabled(kind)) return null;
             return kind === 'detail' ? 'detail' : 'list';
         }
-
+    
         function switchPageMode() {
             const nextMode = resolvePageMode();
             if (nextMode === pageMode) {
@@ -2055,16 +2068,16 @@
             else stopUnknownRouteProbe();
             updatePageKindHint();
         }
-
+    
         // 首帧拿不到卡片（SPA 还没渲染完）时不能直接放弃，观察 DOM 直到出现卡片或离开该 URL。
         let unknownRouteProbe = null;
-
+    
         function stopUnknownRouteProbe() {
             if (!unknownRouteProbe) return;
             unknownRouteProbe.disconnect();
             unknownRouteProbe = null;
         }
-
+    
         function startUnknownRouteProbe() {
             if (unknownRouteProbe || !document.body) return;
             const probedPath = location.pathname;
@@ -2088,7 +2101,7 @@
             unknownRouteProbe.observe(document.body, { childList: true, subtree: true });
             console.info('[WB路由] 当前页面无法按路径识别，已启用 DOM 探测', location.pathname);
         }
-
+    
         function handleRouteChange() {
             const href = location.href;
             if (href === lastRouteHref) return;
@@ -2096,20 +2109,20 @@
             stopUnknownRouteProbe();
             switchPageMode();
         }
-
+    
         function installRouteHooks() {
             if (routeHooksInstalled) return;
             routeHooksInstalled = true;
             window.addEventListener('popstate', handleRouteChange);
             window.addEventListener('hashchange', handleRouteChange);
-
+    
             // Some WB page/extension environments expose read-only History methods.
             // Poll the URL as a safe fallback instead of replacing pushState/replaceState.
             routePollTimer = window.setInterval(() => {
                 if (location.href !== lastRouteHref) handleRouteChange();
             }, 400);
         }
-
+    
         function renderFields(product, isLoading, message = '', detailPending = false) {
             ensurePanel();
             if (!product) {
@@ -2137,7 +2150,7 @@
                     gap:4px; align-items:stretch;
                 `;
                 bodyEl.appendChild(measureGrid);
-
+    
                 const appendFieldRow = (label, value, compact = false, trailing = null, valueBold = false) => {
                     const val = value === undefined || value === null || value === '' ? '—' : String(value);
                     const row = document.createElement('div');
@@ -2181,37 +2194,37 @@
                     }
                     (compact ? measureGrid : bodyEl).appendChild(row);
                 };
-
+    
                 const appendCategoryCell = (label, russianName, chineseName, canCopy = false) => {
                     const cell = document.createElement('div');
                     cell.style.cssText = `
                         min-width:0; padding:3px 0 4px;
                     `;
-
+    
                     const labelEl = document.createElement('div');
                     labelEl.textContent = label;
                     labelEl.style.cssText = `color:#666; font-size:11px; line-height:1.2; margin-bottom:2px;`;
-
+    
                     const valueRow = document.createElement('div');
                     valueRow.style.cssText = `
                         display:grid; grid-template-columns:${canCopy ? 'minmax(0,1fr) 32px' : 'minmax(0,1fr)'};
                         align-items:start; gap:4px; min-width:0;
                     `;
-
+    
                     const russianEl = document.createElement('span');
                     russianEl.textContent = russianName == null || russianName === '' ? '—' : String(russianName);
                     russianEl.style.cssText = `
                         min-width:0; font-size:13px; line-height:1.25; font-weight:600;
                         overflow-wrap:anywhere;
                     `;
-
+    
                     const chineseEl = document.createElement('div');
                     chineseEl.textContent = chineseName == null || chineseName === '' ? '—' : String(chineseName);
                     chineseEl.style.cssText = `
                         font-size:12px; line-height:1.25; font-weight:600;
                         color:#333; overflow-wrap:anywhere;
                     `;
-
+    
                     const makeCopyButton = (value, title) => {
                         const copyBtn = document.createElement('button');
                         copyBtn.type = 'button';
@@ -2233,10 +2246,10 @@
                         };
                         return copyBtn;
                     };
-
+    
                     valueRow.appendChild(russianEl);
                     if (canCopy) valueRow.appendChild(makeCopyButton(russianName, '复制二级类目俄语'));
-
+    
                     const chineseRow = document.createElement('div');
                     chineseRow.style.cssText = `
                         display:${canCopy ? 'grid' : 'block'};
@@ -2245,13 +2258,13 @@
                     `;
                     chineseRow.appendChild(chineseEl);
                     if (canCopy) chineseRow.appendChild(makeCopyButton(chineseName, '复制二级类目中文'));
-
+    
                     cell.appendChild(labelEl);
                     cell.appendChild(valueRow);
                     cell.appendChild(chineseRow);
                     return cell;
                 };
-
+    
                 const appendCategoryGrid = () => {
                     const categoryGrid = document.createElement('div');
                     categoryGrid.style.cssText = `
@@ -2268,7 +2281,7 @@
                     ));
                     bodyEl.appendChild(categoryGrid);
                 };
-
+    
                 const makeButtonGroup = () => {
                     const group = document.createElement('div');
                     group.style.cssText = `display:flex; align-items:center; gap:4px; flex:0 0 auto;`;
@@ -2375,7 +2388,7 @@
                     addButton('详情', 'description', '复制商品详情');
                     return group;
                 };
-
+    
                 for (const f of FIELDS) {
                     if (f.path === '__card__.create_date') appendCategoryGrid();
                     const raw = getByPath(product, f.path);
@@ -2384,10 +2397,10 @@
                         : null;
                     appendFieldRow(f.label, formatValue(f, raw), f.compact === true, cardCopyButtons, f.valueBold === true);
                 }
-
+    
                 // ===== 佣金行 =====
                 const comm = findProductCommission(subjRootId, subjectId);
-
+    
                 const commRow = document.createElement('div');
                 commRow.style.cssText = `
                     margin-top:4px; display:flex; align-items:center; gap:6px;
@@ -2396,11 +2409,11 @@
                 const commLabel = document.createElement('div');
                 commLabel.textContent = '佣金';
                 commLabel.style.cssText = `color:#666; font-size:11px; white-space:nowrap;`;
-
+    
                 const commValueRow = document.createElement('div');
                 // flex:1 让佣金标签占满中间，标签多了自己换行，右侧按钮不会被挤走
                 commValueRow.style.cssText = `display:flex; flex:1 1 auto; min-width:0; gap:3px; align-items:center; flex-wrap:wrap;`;
-
+    
                 function mkTag(text, val, color) {
                     const el = document.createElement('span');
                     el.style.cssText = `
@@ -2412,7 +2425,7 @@
                     el.innerHTML = `<span style="opacity:.75;">${text}</span><b>${val}</b>`;
                     return el;
                 }
-
+    
                 if (comm) {
                     commValueRow.appendChild(mkTag('本FBO', comm[0], '#cb11ab'));
                     commValueRow.appendChild(mkTag('本FBS', comm[1], '#5b8def'));
@@ -2427,13 +2440,13 @@
                     nf.style.cssText = `color:#999; font-size:12px; min-width:0; overflow-wrap:anywhere;`;
                     commValueRow.appendChild(nf);
                 }
-
+    
                 commRow.appendChild(commLabel);
                 commRow.appendChild(commValueRow);
                 // 评论 / 提问 下载按钮挪到佣金行右侧
                 commRow.appendChild(makeDownloadButtons());
                 bodyEl.appendChild(commRow);
-
+    
                 if (remoteCommissionStatus.kind !== 'loaded') {
                     const statusEl = document.createElement('div');
                     statusEl.textContent = remoteCommissionStatus.message;
@@ -2443,14 +2456,14 @@
                     `;
                     bodyEl.appendChild(statusEl);
                 }
-
+    
                 // ===== WB折扣 输入 =====
                 const coefRow = document.createElement('div');
                 coefRow.style.cssText = `
                     margin-top:3px; display:flex; align-items:center;
                     gap:2px; min-width:0; padding:3px 0;
                 `;
-
+    
                 const coefLeft = document.createElement('div');
                 coefLeft.style.cssText = `
                     display:flex; align-items:center; gap:2px;
@@ -2463,7 +2476,7 @@
                     flex:0 0 auto; height:24px; min-width:0; box-sizing:border-box;
                     color:#666; font-size:11.5px; line-height:1; white-space:nowrap;
                 `;
-
+    
                 const coefWrap = document.createElement('div');
                 coefWrap.style.cssText = `
                     display:flex; align-items:center; justify-content:center;
@@ -2474,7 +2487,7 @@
                     padding: 0 1px;
                     transition: border-color .15s, box-shadow .15s, background .15s;
                 `;
-
+    
                 const coefInput = document.createElement('input');
                 coefInput.type = 'number';
                 coefInput.step = '1';
@@ -2496,7 +2509,7 @@
                 `;
                 coefInput.classList.add('wb-no-spin');
                 coefInput.addEventListener('wheel', e => e.preventDefault(), { passive: false });
-
+    
                 if (!document.getElementById('wb-no-spin-style')) {
                     const st = document.createElement('style');
                     st.id = 'wb-no-spin-style';
@@ -2513,7 +2526,7 @@
                     `;
                     document.head.appendChild(st);
                 }
-
+    
                 const percentSign = document.createElement('span');
                 percentSign.textContent = '%';
                 percentSign.style.cssText = `
@@ -2522,7 +2535,7 @@
                     margin-left: 1px;
                     user-select: none;
                 `;
-
+    
                 coefInput.addEventListener('focus', () => {
                     coefWrap.style.borderColor = '#cb11ab';
                     coefWrap.style.background  = '#fff';
@@ -2533,25 +2546,25 @@
                     coefWrap.style.background  = '#fafafa';
                     coefWrap.style.boxShadow   = 'none';
                 });
-
+    
                 coefInput.onchange = () => {
                     setDiscountPercent(coefInput.value);
                     coefInput.value = String(getDiscountPercent());
                 };
-
+    
                 coefWrap.appendChild(coefInput);
                 coefWrap.appendChild(percentSign);
-
+    
                 coefLeft.appendChild(coefLabel);
                 coefLeft.appendChild(coefWrap);
                 coefRow.appendChild(coefLeft);
-
+    
                 const actionGroup = document.createElement('div');
                 actionGroup.style.cssText = `
                     display:flex; align-items:center; flex:0 0 60%;
                     gap:1px; min-width:0; margin-left:auto;
                 `;
-
+    
                 const actionButtonStyle = `
                     display:flex; align-items:center; justify-content:center;
                     flex:1 1 0; width:0; min-width:0; height:24px; box-sizing:border-box;
@@ -2559,7 +2572,7 @@
                     background:#cb11ab; color:#fff; border:none;
                     border-radius:5px; cursor:pointer;
                 `;
-
+    
                 const budgetBtn = document.createElement('button');
                 budgetBtn.type = 'button';
                 budgetBtn.textContent = '预算计算';
@@ -2571,19 +2584,19 @@
                     const productRaw   = pickProductPrice(product);
                     const subjName     = getByPath(product, '__card__.subj_name');
                     const subjRootName = getByPath(product, '__card__.subj_root_name');
-
+    
                     const weight = (weightRaw == null || weightRaw === '') ? '' : Number(weightRaw).toFixed(1);
                     const volume = (volumeRaw == null || volumeRaw === '') ? '' : (Number(volumeRaw) / 10).toFixed(1);
                     const discount = getDiscountPercent();
                     const price = calcSellPrice(productRaw, discount);
-
+    
                     const url = new URL(BUDGET_URL);
                     if (weight) url.searchParams.set('wb_weight', weight);
                     if (volume) url.searchParams.set('wb_volume', volume);
                     if (price)  url.searchParams.set('wb_price', price);
                     if (subjRootName) url.searchParams.set('wb_subj_root_name', String(subjRootName));
                     if (subjName)     url.searchParams.set('wb_subj_name', String(subjName));
-
+    
                     console.log('[WB预算] productRaw:', productRaw,
                                 ' discount:', discount + '%',
                                 ' price:', price,
@@ -2592,20 +2605,20 @@
                     window.open(url.toString(), '_blank');
                 };
                 actionGroup.appendChild(budgetBtn);
-
+    
                 const copyAllBtn = document.createElement('button');
                 copyAllBtn.type = 'button';
                 copyAllBtn.textContent = '复制全部';
                 copyAllBtn.style.cssText = actionButtonStyle;
                 copyAllBtn.onclick = e => {
                     e.stopPropagation();
-
+    
                     const subjName = getByPath(product, '__card__.subj_name');
                     const subjRootId = getByPath(product, '__card__.subject_root_id');
                     const subjectId = getByPath(product, '__card__.subject_id');
                     const commission = findProductCommission(subjRootId, subjectId);
                     const fboCommission = (commission && commission[0] != null) ? commission[0] : '';
-
+    
                     const weightRaw = getByPath(product, 'weight');
                     const volumeRaw = getByPath(product, 'volume');
                     const priceRaw = pickProductPrice(product);
@@ -2617,7 +2630,7 @@
                     const productUrl = wbId
                         ? `https://www.wildberries.ru/catalog/${wbId}/detail.aspx?targetUrl=MI`
                         : '';
-
+    
                     const cells = [
                         fboCommission,
                         '按重量',
@@ -2635,14 +2648,14 @@
                         priceStr,
                     ];
                     const line = cells.map(value => value == null ? '' : String(value)).join('\t');
-
+    
                     copyText(line).then(() => {
                         copyAllBtn.textContent = '已复制';
                         setTimeout(() => { copyAllBtn.textContent = '复制全部'; }, 1200);
                     }).catch(() => alert('复制失败，请手动复制：\n' + line));
                 };
                 actionGroup.appendChild(copyAllBtn);
-
+    
                 const supplierId = getSupplierId(product);
                 const sellerHomeBtn = document.createElement('button');
                 sellerHomeBtn.type = 'button';
@@ -2668,21 +2681,21 @@
             }
             insertIntoPage();
         }
-
+    
         function findDetailAside() {
             const containers = Array.from(document.querySelectorAll(
                 '[class^="productPageAsideSticky"], .product-page__aside-sticky'
             ));
             return containers.find(el => el.getClientRects().length > 0) || containers[0] || null;
         }
-
+    
         function findBuyBlock() {
             const target = Array.from(document.querySelectorAll('button')).find(button => {
                 const text = (button.textContent || '').trim();
                 return text === 'Добавить в корзину' || text === 'Купить сейчас';
             });
             if (!target) return null;
-
+    
             let el = target;
             for (let i = 0; i < 15 && el && el !== document.body; i++) {
                 const parent = el.parentElement;
@@ -2700,40 +2713,40 @@
             }
             return null;
         }
-
+    
         function findInsertionPoint() {
             const aside = findDetailAside();
             if (aside) {
                 return { parent: aside, before: aside.firstChild === panelEl ? panelEl.nextSibling : aside.firstChild };
             }
-
+    
             const sellerInfo = document.querySelector('section[aria-label="Информация о продавце"]');
             const sellerWrap = sellerInfo && sellerInfo.parentElement;
             if (sellerWrap && sellerWrap.parentElement) {
                 return { parent: sellerWrap.parentElement, before: sellerWrap };
             }
-
+    
             const buyBlock = findBuyBlock();
             if (buyBlock && buyBlock.parentElement) {
                 return { parent: buyBlock.parentElement, before: buyBlock };
             }
-
+    
             const favoriteButton = document.querySelector('button[aria-label="Добавить в избранное"]');
             if (favoriteButton && favoriteButton.parentElement) {
                 return { parent: favoriteButton.parentElement, before: favoriteButton };
             }
             return null;
         }
-
+    
         function insertIntoPage() {
             if (!panelEl || pageMode !== 'detail' || panelClosed) return;
             const point = findInsertionPoint();
             if (!point) return;
-
+    
             const nmId = getCurrentNmId();
             if (panelEl.parentElement === point.parent && panelEl.nextSibling === point.before &&
                 panelEl.style.display === 'block' && panelPlacementNm === nmId) return;
-
+    
             panelPlacementNm = nmId;
             panelEl.style.position = '';
             panelEl.style.right = '';
@@ -2748,10 +2761,10 @@
             panelEl.style.margin = '0 0 10px';
             panelEl.style.overflowY = 'visible';
             panelEl.style.display = 'block';
-
+    
             point.parent.insertBefore(panelEl, point.before);
         }
-
+    
         let lastRenderedNm = null;
         function tryRender() {
             if (pageMode !== 'detail') return;
@@ -2779,7 +2792,7 @@
             renderFields(product, false, '', !rec);
         }
         function onDataArrived() { tryRender(); }
-
+    
         const recoveredDetailUrls = new Set();
         const recoveredCardUrls = new Set();
         let networkHooksInstalled = false;
@@ -2793,20 +2806,20 @@
             const urls = new Set();
             const knownUrl = window.__WB_DETAIL_URLS__?.[nmId];
             if (knownUrl) urls.add(String(knownUrl));
-
+    
             const entries = window.performance?.getEntriesByType
                 ? performance.getEntriesByType('resource').map(entry => String(entry?.name || ''))
                     .filter(url => url.includes(TARGET_DETAIL))
                 : [];
             const matching = entries.filter(url => getNmFromCardUrl(url) === nmId);
             for (const url of matching.slice(-3)) urls.add(url);
-
+    
             if (!urls.size) {
                 for (const url of entries.slice(-3)) urls.add(url);
             }
             return urls;
         }
-
+    
         function getCardRequestUrls(nmId) {
             const urls = new Set();
             const knownUrl = window.__WB_CARD_URLS__?.[nmId];
@@ -2829,7 +2842,7 @@
             urls.add(`${location.origin}/catalog/${nmId}/info/ru/card.json`);
             return urls;
         }
-
+    
         function loadExistingDetailData(targetNmId = getCurrentNmId()) {
             if (pageMode !== 'detail' || !targetNmId || !origFetch || window.__WB_CAPTURED__?.[targetNmId]) return;
             for (const url of getDetailRequestUrls(targetNmId)) {
@@ -2847,7 +2860,7 @@
                     .finally(() => recoveredDetailUrls.delete(url));
             }
         }
-
+    
         function loadExistingCardData(targetNmId = getCurrentNmId()) {
             if (pageMode !== 'detail' || !targetNmId || !origFetch || window.__WB_CARD__?.[targetNmId]) return;
             for (const url of getCardRequestUrls(targetNmId)) {
@@ -2865,7 +2878,7 @@
                     .finally(() => recoveredCardUrls.delete(url));
             }
         }
-
+    
         function scheduleProductDataRecovery(nmId) {
             if (!nmId) return;
             for (const delay of [100, 700, 1800]) {
@@ -2876,26 +2889,26 @@
                 }, delay);
             }
         }
-
+    
         function refreshProductData(nmId) {
             if (!nmId || pageMode !== 'detail' || getCurrentNmId() !== nmId) return false;
-
+    
             ensureDetailState();
             const hasDetail = Boolean(window.__WB_CAPTURED__?.[nmId]);
             const hasCard = Boolean(window.__WB_CARD__?.[nmId]);
             if (!hasDetail && !hasCard) return false;
-
+    
             onDataArrived();
             return true;
         }
-
+    
         function installNetworkHooks() {
             if (networkHooksInstalled) return;
             networkHooksInstalled = true;
             origFetch = PAGE_WINDOW.fetch;
             origOpen = PAGE_WINDOW.XMLHttpRequest.prototype.open;
             origSend = PAGE_WINDOW.XMLHttpRequest.prototype.send;
-
+    
             if (typeof origFetch === 'function') {
                 wrappedFetch = async function (...args) {
                     const input = args[0];
@@ -2932,7 +2945,7 @@
                 };
                 PAGE_WINDOW.fetch = wrappedFetch;
             }
-
+    
             wrappedOpen = function (method, url, ...rest) {
                 this.__wb_url = String(url || '');
                 this.__wb_nm = getNmFromCardUrl(this.__wb_url) || getCurrentNmId() || '';
@@ -2972,7 +2985,7 @@
             PAGE_WINDOW.XMLHttpRequest.prototype.open = wrappedOpen;
             PAGE_WINDOW.XMLHttpRequest.prototype.send = wrappedSend;
         }
-
+    
         installNetworkHooks();
         try {
             installRouteHooks();
@@ -2994,19 +3007,19 @@
         window.addEventListener('DOMContentLoaded', bootstrap, { once: true });
         if (document.readyState !== 'loading') bootstrap();
     }
-
+    
     // ============================================================
     // 预算计算器端
     // ============================================================
     function initBudgetCalculator() {
-
+    
         async function fillWeight(weight) {
             if (!weight) return;
             const el = await waitFor('input[name="weight"]');
             setInputValue(el, weight);
             console.log('[预算填充] 重量已填:', weight);
         }
-
+    
         async function fillVolume(volume) {
             if (!volume) return;
             const dims = LWH_RULE(volume);
@@ -3019,7 +3032,7 @@
             setInputValue(heiEl, dims.height);
             console.log('[预算填充] 尺寸已填:', dims);
         }
-
+    
         async function fillPrice(price) {
             if (!price) { console.warn('[预算填充] wb_price 为空，跳过'); return; }
             const el = await waitFor('input[name="price"]');
@@ -3028,10 +3041,10 @@
             try { if (window.layui && window.layui.form) window.layui.form.render(); } catch (e) {}
             console.log('[预算填充] 售价已填:', price);
         }
-
+    
         async function fillWbCategory(rootName, subjName) {
             if (!subjName) return;
-
+    
             const pageWindow = (typeof unsafeWindow !== 'undefined' && unsafeWindow)
                 ? unsafeWindow
                 : window;
@@ -3045,7 +3058,7 @@
                 console.warn('[预算填充] 页面类目树未就绪，等待 20 秒仍未找到 wb_category_tree');
                 return;
             }
-
+    
             const norm = s => String(s || '')
                 .replace(/[（(].*?[)）]/g, '')
                 .replace(/\s+/g, '')
@@ -3056,12 +3069,12 @@
                 console.warn('[预算填充] 二级类目名称为空，无法匹配');
                 return;
             }
-
+    
             const pickLabel = n => n.label ?? n.name ?? n.title ?? n.text ?? '';
             const pickValue = n => n.value ?? n.id ?? n.category_id ?? n.categoryId
                 ?? n.subject_id ?? n.subjectId ?? n.subj_id ?? n.key ?? n.code ?? '';
             const pickKids  = n => n.children ?? n.child ?? n.nodes ?? n.list ?? [];
-
+    
             const exactRoots = rootKey
                 ? tree.filter(node => norm(pickLabel(node)) === rootKey)
                 : [];
@@ -3073,7 +3086,7 @@
                 : [];
             let scopedRoots = exactRoots.length ? exactRoots : partialRoots;
             if (!scopedRoots.length) scopedRoots = tree;
-
+    
             function findMatches(roots, allowPartial) {
                 const matches = [];
                 function walk(nodes, path) {
@@ -3093,12 +3106,12 @@
                     }
                 }
                 walk(roots, []);
-
+    
                 const unique = new Map();
                 for (const match of matches) unique.set(String(match.id), match);
                 return Array.from(unique.values());
             }
-
+    
             let matches = findMatches(scopedRoots, false);
             if (!matches.length && scopedRoots !== tree) matches = findMatches(tree, false);
             if (!matches.length) matches = findMatches(scopedRoots, true);
@@ -3111,18 +3124,18 @@
                 });
                 return;
             }
-
+    
             const { id: foundId, labels: foundLabels } = matches[0];
-
+    
             console.log('[预算填充] 匹配到 id:', foundId, ' 路径:', foundLabels);
-
+    
             let hidden;
             try { hidden = await waitFor('#wb_category_id', 10000); }
             catch (e) { console.warn('[预算填充] 未找到 #wb_category_id'); return; }
-
+    
             setInputValue(hidden, String(foundId));
             console.log('[预算填充] 已写 #wb_category_id =', hidden.value);
-
+    
             const wrap = hidden.closest('.layui-input-block') || hidden.parentElement;
             const visibleInput = wrap && wrap.querySelector('input.el-input__inner');
             if (visibleInput) {
@@ -3130,12 +3143,12 @@
                 setInputValue(visibleInput, fullText);
                 console.log('[预算填充] 已写可视 input =', visibleInput.value);
             }
-
+    
             try {
                 if (pageWindow.layui && pageWindow.layui.form) pageWindow.layui.form.render();
             } catch (e) {}
         }
-
+    
         function readBudgetParams() {
             return {
                 wb_weight: getParam('wb_weight'),
@@ -3145,15 +3158,15 @@
                 wb_subj_name: getParam('wb_subj_name'),
             };
         }
-
+    
         function hasBudgetParams(params) {
             return Object.values(params).some(Boolean);
         }
-
+    
         async function main() {
             const params = readBudgetParams();
             if (!hasBudgetParams(params)) return;
-
+    
             console.log('[预算填充] URL 参数:', params);
             try {
                 await fillWeight(params.wb_weight);
@@ -3164,7 +3177,7 @@
                 console.warn('[预算填充] 出错:', error);
             }
         }
-
+    
         if (document.readyState === 'complete') setTimeout(main, 800);
         else window.addEventListener('load', () => setTimeout(main, 800));
     }
