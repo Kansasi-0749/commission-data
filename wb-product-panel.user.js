@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WB 商品数据窗口
 // @namespace    http://tampermonkey.net/
-// @version      17.3.5
+// @version      17.3.7
 // @updateURL    https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/wb-product-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Kansasi-0749/commission-data/main/wb-product-panel.user.js
 // @description  拦截 Wildberries 商品接口，显示商品数据；一键跳转预算计算器并自动填充重量/尺寸/售价/类目；详情页/列表页/首页/店铺页/图片搜索页可分别开关
@@ -1417,7 +1417,20 @@
         let productLoadNm = null;
         let listObserver = null;
         let listRenderQueued = false;
-    
+
+        function isOwnedPanelNode(node) {
+            const element = node && node.nodeType === 1 ? node : node?.parentElement;
+            return Boolean(element?.closest?.('.wb-list-product-panel, #wb-data-panel'));
+        }
+
+        function mutationNeedsListRender(records) {
+            return records.some(record => {
+                if (isOwnedPanelNode(record.target)) return false;
+                const changedNodes = [...record.addedNodes, ...record.removedNodes];
+                return changedNodes.length === 0 || changedNodes.some(node => !isOwnedPanelNode(node));
+            });
+        }
+
         function queueListRender() {
             if (pageMode !== 'list' && pageMode !== 'detail') return;
             if (pageMode === 'detail' && !detailRecommendNmIds.size) return;
@@ -1445,12 +1458,29 @@
             return getNmFromCatalogHref(link?.getAttribute('href'));
         }
     
+        // 卖家推荐区域使用另一套自定义 Swiper 卡片结构；这里不注入商品数据面板。
+        // 同时覆盖 CSS Module 可能追加的后缀，避免依赖某一个固定 hash 类名。
+        const SELLER_RECOMMENDATION_SELECTOR = [
+            '[class*="product-page__seller-recommend"]',
+            '[class*="seller-recommend"]',
+            '[class*="premium-products"]',
+        ].join(', ');
+
+        function isSellerRecommendationNode(node) {
+            if (!node || node.nodeType !== 1) return false;
+            return Boolean(node.closest(SELLER_RECOMMENDATION_SELECTOR));
+        }
+
         // 详情页的颜色/规格缩略图也带有商品详情链接和 data-nm-id，
         // 但它们不是推荐商品卡，不能把列表面板插进横向缩略图滑块。
         function isDetailVariantSlideNode(node) {
             if (pageMode !== 'detail' || !node || node.nodeType !== 1) return false;
             const slide = node.closest('.swiper-slide, [class*="slide--"]');
-            return Boolean(slide && slide.querySelector('a[href*="/catalog/"] [class*="colorImage"]'));
+            if (!slide) return false;
+            const variantImageSelector = '[class*="colorImage"], [class*="color-image"], [class*="color_image"]';
+            const hasVariantImage = slide.matches(variantImageSelector) || Boolean(slide.querySelector(variantImageSelector));
+            const hasCatalogLink = slide.matches('a[href*="/catalog/"]') || Boolean(slide.querySelector('a[href*="/catalog/"]'));
+            return hasVariantImage && hasCatalogLink;
         }
     
         // 未知卡片结构时的兜底：从商品详情链接往上找一块尺寸合理的祖先当容器。
@@ -1468,20 +1498,29 @@
     
         function getListProductCards() {
             const cards = [];
-            const seenCards = new Set();
+            const cardIndexesByNmId = new Map();
             const addCard = candidate => {
-                if (!candidate || candidate === document.body) return;
+                if (!candidate || candidate === document.body || isSellerRecommendationNode(candidate)) return;
                 const source = candidate;
                 if (isDetailVariantSlideNode(source)) return;
                 const node = candidate.tagName === 'A' ? candidate.parentElement : candidate;
-                if (!node || isDetailVariantSlideNode(node)) return;
+                if (!node || isSellerRecommendationNode(node) || isDetailVariantSlideNode(node)) return;
                 const card = node.matches('article.product-card, .product-card')
                     ? node
                     : node.closest('article.product-card, .product-card') || node;
-                if (!card || card.tagName === 'A' || isDetailVariantSlideNode(card) || seenCards.has(card)) return;
+                if (!card || isSellerRecommendationNode(card) || card.tagName === 'A' || isDetailVariantSlideNode(card)) return;
                 const nmId = getListCardNmId(card) || getListCardNmId(source);
                 if (!nmId) return;
-                seenCards.add(card);
+                const existingIndex = cardIndexesByNmId.get(nmId);
+                if (existingIndex !== undefined) {
+                    const existingCard = cards[existingIndex][1];
+                    if (existingCard === card || card.contains(existingCard)) return;
+                    // WB 的推荐滑块常把同一商品同时标在 swiper-slide 和内层 article 上。
+                    // 只保留更具体的内层卡片，避免两个容器反复抢同一个面板。
+                    if (existingCard.contains(card)) cards[existingIndex] = [nmId, card];
+                    return;
+                }
+                cardIndexesByNmId.set(nmId, cards.length);
                 cards.push([nmId, card]);
             };
     
@@ -1494,13 +1533,13 @@
                 // 完全认不出的版式（图片搜索/店铺新模板等）：用详情链接 + 几何尺寸兜底。
                 document.querySelectorAll('a[href*="/catalog/"][href*="/detail"]')
                     .forEach(link => {
-                        if (cards.length >= 200 || isDetailVariantSlideNode(link)) return;
+                        if (cards.length >= 200 || isSellerRecommendationNode(link) || isDetailVariantSlideNode(link)) return;
                         const nmId = getNmFromCatalogHref(link.getAttribute('href'));
                         if (!nmId) return;
                         const host = findGenericCardHost(link);
-                        if (isDetailVariantSlideNode(host)) return;
-                        if (!host || seenCards.has(host)) return;
-                        seenCards.add(host);
+                        if (isSellerRecommendationNode(host) || isDetailVariantSlideNode(host)) return;
+                        if (!host || cardIndexesByNmId.has(nmId)) return;
+                        cardIndexesByNmId.set(nmId, cards.length);
                         cards.push([nmId, host]);
                     });
             }
@@ -1666,9 +1705,9 @@
         }
     
         function getListPanelHost(card) {
-            return card.querySelector(':scope > .product-card__wrapper')
-                || card.querySelector('.product-card__wrapper')
-                || card;
+            // product-card__wrapper 在部分新版模板只是图片/媒体包装层。
+            // 面板挂在这里会改变图片容器的尺寸，并触发滑块重新测量；挂到卡片根节点才稳定。
+            return card;
         }
     
         function fixListCardHeight(card) {
@@ -1688,8 +1727,28 @@
             }
         }
     
+        function cleanupDuplicateListPanels(cards) {
+            const canonicalCards = new Map(cards);
+            const keptCards = new Set();
+            document.querySelectorAll('.wb-list-product-panel').forEach(panel => {
+                const nmId = panel.dataset.wbNmId || '';
+                const canonicalCard = canonicalCards.get(nmId);
+                if (!canonicalCard) return;
+                const nearestCard = panel.closest('article.product-card, .product-card');
+                if (nearestCard && nearestCard !== canonicalCard) {
+                    panel.remove();
+                    return;
+                }
+                if (keptCards.has(canonicalCard)) panel.remove();
+                else keptCards.add(canonicalCard);
+            });
+        }
+
         function renderListPanels() {
             if (pageMode !== 'list' && pageMode !== 'detail') return;
+            document.querySelectorAll('.wb-list-product-panel').forEach(panel => {
+                if (isSellerRecommendationNode(panel)) panel.remove();
+            });
             const allCards = getListProductCards();
             const cards = pageMode === 'detail'
                 ? allCards.filter(([nmId]) => detailRecommendNmIds.has(nmId))
@@ -1702,14 +1761,19 @@
                         isDetailVariantSlideNode(panel)) panel.remove();
                 });
             }
+            cleanupDuplicateListPanels(cards);
             // 列表页和详情页推荐卡都按渲染出来的卡片补抓 basket card.json。
             // 先登记再渲染，第一帧就能显示「读取中…」；已加载/请求中/超过重试上限的会被内部过滤。
             queueListCardDataLoads(cards.map(([nmId]) => nmId));
             for (const [nmId, card] of cards) {
                 fixListCardHeight(card);
                 const host = getListPanelHost(card);
-                if (!host || isDetailVariantSlideNode(host)) continue;
-                let panel = card.querySelector('.wb-list-product-panel');
+                if (!host || isSellerRecommendationNode(host) || isDetailVariantSlideNode(host)) continue;
+                const panels = [...card.querySelectorAll('.wb-list-product-panel')];
+                let panel = panels.find(item => item.dataset.wbNmId === nmId) || panels[0];
+                for (const extra of panels) {
+                    if (extra !== panel) extra.remove();
+                }
                 if (!panel) {
                     panel = document.createElement('div');
                     panel.className = 'wb-list-product-panel';
@@ -1767,7 +1831,9 @@
                 return;
             }
             if (!listObserver) {
-                listObserver = new MutationObserver(queueListRender);
+                listObserver = new MutationObserver(records => {
+                    if (mutationNeedsListRender(records)) queueListRender();
+                });
                 listObserver.observe(document.body, { childList: true, subtree: true });
             }
             loadRemoteCommissionData();
@@ -1957,9 +2023,9 @@
             ensurePanel();
             panelClosed = false;
             if (!detailObserver && document.body) {
-                detailObserver = new MutationObserver(() => {
+                detailObserver = new MutationObserver(records => {
                     queueInsert();
-                    queueListRender();
+                    if (mutationNeedsListRender(records)) queueListRender();
                 });
                 detailObserver.observe(document.documentElement, {
                     childList: true,
