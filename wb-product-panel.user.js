@@ -1464,6 +1464,9 @@
             '[class*="product-page__seller-recommend"]',
             '[class*="seller-recommend"]',
             '[class*="premium-products"]',
+            // 详情页“多个卖家”列表（multipleSellersList--hash）不是商品推荐卡。
+            '[class*="multipleSellersList"]',
+            '[class*="multiple-sellers-list"]',
         ].join(', ');
 
         function isSellerRecommendationNode(node) {
